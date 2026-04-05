@@ -1,15 +1,11 @@
 {
   "crons": [
     {
-      "path": "/api/qualify-calls",
-      "schedule": "0 9 * * *"
+      "path": "/api/cron/callrail",
+      "schedule": "0 8 * * *"
     },
     {
-      "path": "/api/qualify-calls-recording",
-      "schedule": "0 9 * * *"
-    },
-    {
-      "path": "/api/qualify-forms",
+      "path": "/api/cron/callrail",
       "schedule": "0 9 * * *"
     }
   ]
