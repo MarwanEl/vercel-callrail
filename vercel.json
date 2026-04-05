@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/qualify-calls",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/qualify-calls-recording",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/qualify-forms",
+      "schedule": "0 9 * * *"
+    }
+  ]
+}

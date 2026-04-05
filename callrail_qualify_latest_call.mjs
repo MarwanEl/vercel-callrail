@@ -1088,7 +1088,15 @@ async function main() {
   console.log(`Batch complete. Processed=${processed}, Skipped=${skipped}, TotalSeen=${processedIds.size}`);
 }
 
-main().catch((error) => {
-  console.error(`Error: ${error.message}`);
-  process.exitCode = 1;
-});
+export { main, processSingleCall, fetchTargetCall, parseArgs };
+
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('callrail_qualify_latest_call.mjs') ||
+  process.argv[1].endsWith('callrail_qualify_latest_call')
+);
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(`Error: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
