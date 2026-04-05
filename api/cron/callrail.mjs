@@ -1,6 +1,6 @@
-import { parseArgs as parseCallArgs, main as callMain } from '../../callrail_qualify_latest_call.mjs';
-import { parseArgs as parseRecordingArgs, main as recordingMain } from '../../callrail_qualify_latest_call_recording_transcribe.mjs';
-import { parseArgs as parseFormArgs, main as formMain } from '../../callrail_qualify_latest_form_submission.mjs';
+import { main as callMain } from '../../callrail_qualify_latest_call.mjs';
+import { main as recordingMain } from '../../callrail_qualify_latest_call_recording_transcribe.mjs';
+import { main as formMain } from '../../callrail_qualify_latest_form_submission.mjs';
 
 function isLAWindow() {
   const la = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
@@ -10,6 +10,30 @@ function isLAWindow() {
 
 function dateStr(d) {
   return d.toISOString().slice(0, 10);
+}
+
+function captureConsole(fn) {
+  const lines = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...args) => { const line = args.join(' '); lines.push(line); origLog(...args); };
+  console.error = (...args) => { const line = args.join(' '); lines.push(`[ERROR] ${line}`); origErr(...args); };
+  const restore = () => { console.log = origLog; console.error = origErr; };
+  return { lines, restore };
+}
+
+function parseBatchLine(lines) {
+  for (const line of lines) {
+    const m = line.match(/Batch complete\.\s*Processed=(\d+),\s*Skipped=(\d+),\s*TotalSeen=(\d+)/);
+    if (m) return { processed: +m[1], skipped: +m[2], totalSeen: +m[3] };
+  }
+  // Check for single-call processing or no-target messages
+  const hasNoTarget = lines.some(l => /no .*(calls?|form).* found|nothing to process/i.test(l));
+  if (hasNoTarget) return { processed: 0, skipped: 0, totalSeen: 0 };
+  // If we saw processing but no batch line, it was a single item
+  const hasProcessed = lines.some(l => /Update complete|classification|Decision:/i.test(l));
+  if (hasProcessed) return { processed: 1, skipped: 0, totalSeen: 1 };
+  return { processed: 0, skipped: 0, totalSeen: 0 };
 }
 
 export default async function handler(req, res) {
@@ -51,6 +75,7 @@ export default async function handler(req, res) {
       const useRecording = transcribeSet.has(accountId);
       const callArgv = ['--apply', '--process-all', '--account-id', accountId, '--date-from', dateFrom, '--date-to', dateTo];
       const originalArgv = process.argv;
+      const { lines, restore } = captureConsole();
 
       if (useRecording) {
         process.argv = ['node', 'callrail_qualify_latest_call_recording_transcribe.mjs', ...callArgv];
@@ -60,8 +85,10 @@ export default async function handler(req, res) {
         await callMain();
       }
 
+      restore();
       process.argv = originalArgv;
-      accountResult.calls = { ok: true, script: useRecording ? 'recording-transcribe' : 'call' };
+      const counts = parseBatchLine(lines);
+      accountResult.calls = { ok: true, script: useRecording ? 'recording-transcribe' : 'call', ...counts };
     } catch (error) {
       accountResult.calls = { ok: false, error: error.message };
     }
@@ -70,12 +97,15 @@ export default async function handler(req, res) {
     try {
       const formArgv = ['--apply', '--process-all', '--account-id', accountId, '--date-from', dateFrom, '--date-to', dateTo];
       const originalArgv = process.argv;
+      const { lines, restore } = captureConsole();
       process.argv = ['node', 'callrail_qualify_latest_form_submission.mjs', ...formArgv];
 
       await formMain();
 
+      restore();
       process.argv = originalArgv;
-      accountResult.forms = { ok: true };
+      const counts = parseBatchLine(lines);
+      accountResult.forms = { ok: true, ...counts };
     } catch (error) {
       accountResult.forms = { ok: false, error: error.message };
     }
