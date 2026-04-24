@@ -8,5 +8,10 @@
       "path": "/api/cron/callrail",
       "schedule": "0 9 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "api/cron/callrail.mjs": {
+      "maxDuration": 300
+    }
+  }
 }

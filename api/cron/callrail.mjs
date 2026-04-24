@@ -62,8 +62,10 @@ export default async function handler(req, res) {
 
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const dateTo = dateStr(now);
-  const dateFrom = dateStr(sevenDaysAgo);
+  const dateFromQ = typeof req.query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : null;
+  const dateToQ = typeof req.query.to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : null;
+  const dateTo = dateToQ || dateStr(now);
+  const dateFrom = dateFromQ || dateStr(sevenDaysAgo);
 
   const results = [];
 
