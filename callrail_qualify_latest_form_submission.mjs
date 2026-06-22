@@ -61,6 +61,8 @@ const DUAL_SOURCE_EVIDENCE_PATTERNS = [
 
 const DIGITAL_PASS_ALONG_PATTERNS = [
   /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,120}\b(googled|google|searched|looked\s+(?:you|us|brumley)?\s*up|found\s+(?:you|us|brumley).{0,40}\bonline|found\s+(?:you|us|brumley).{0,40}\bgoogle|saw\s+(?:you|us|brumley).{0,40}\b(?:facebook|instagram|tiktok|social))\b/i,
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,140}\b(sent|shared|texted|forwarded|gave)\b.{0,120}\b(screenshot|screen\s*shot|link|listing|search result|google result|name|number)\b.{0,180}\b(google|searched|searching|online|web|internet|attorneys?|lawyers?|law firms?)\b/i,
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,140}\b(google|searched|searching|online|web|internet|attorneys?|lawyers?|law firms?)\b.{0,180}\b(sent|shared|texted|forwarded|gave)\b.{0,120}\b(screenshot|screen\s*shot|link|listing|search result|google result|name|number)\b/i,
   /\b(googled|google|searched|online|website|facebook|instagram|tiktok|social)\b.{0,140}\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,140}\b(told|sent|shared|recommended|suggested)\b/i,
   /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,100}\b(told|said|suggested)\b.{0,140}\b(look\s+up|google|search|find)\s+(?:a|an|some)?\s*(lawyer|attorney|firm)\b/i,
   /\b(reposted|shared)\b.{0,80}\b(instagram|facebook|tiktok|social|post)\b/i,
@@ -1122,9 +1124,10 @@ function buildUpdatePayload(call, classification, options = {}) {
 
     // Guardrail: qualified submission must always have "Qualified" and never keep duplicate tag.
     const currentTags = getTagNames(call);
-    const filteredTags = currentTags.filter((tag) => tag !== DUPLICATE_TAG);
+    const workflowTags = new Set(WORKFLOW_TAGS);
+    const filteredTags = currentTags.filter((tag) => !workflowTags.has(tag));
     const hasQualifiedTag = filteredTags.includes(QUALIFIED_TAG);
-    if (currentTags.includes(DUPLICATE_TAG) || !hasQualifiedTag) {
+    if (currentTags.some((tag) => workflowTags.has(tag)) || !hasQualifiedTag) {
       payload.tags = [...new Set([...filteredTags, QUALIFIED_TAG])];
       payload.append_tags = false;
     }
