@@ -323,36 +323,46 @@ function getSecondarySourceTag(text) {
 
 function applySourceSecondaryTag(call, payload, options = {}) {
   const textForDetection = options.textForDetection ?? getDualSourceDetectionText(call);
+  const hasExplicitSourceTag = Object.prototype.hasOwnProperty.call(options, 'sourceTag');
   const requestedSourceTag = [DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG].includes(options.sourceTag) ? options.sourceTag : null;
-  const sourceTag = requestedSourceTag ?? getSecondarySourceTag(textForDetection);
+  const sourceTag = hasExplicitSourceTag ? requestedSourceTag : getSecondarySourceTag(textForDetection);
+  const sourceTags = new Set([DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG]);
+  const currentTags = getTagNames(call);
+  const payloadHasTags = Array.isArray(payload.tags);
+  const payloadTags = payloadHasTags ? payload.tags.filter(Boolean) : [];
+  const hasCurrentSourceTag = currentTags.some((tag) => sourceTags.has(tag));
+  const hasPayloadSourceTag = payloadTags.some((tag) => sourceTags.has(tag));
+
   if (!sourceTag) {
-    return { payload, added: false };
+    if (!hasCurrentSourceTag && !hasPayloadSourceTag) {
+      return { payload, changed: false, added: false };
+    }
+
+    const next = { ...payload };
+    const baseTags = payloadHasTags ? payloadTags : currentTags;
+    next.tags = [...new Set(baseTags.filter((tag) => !sourceTags.has(tag)))];
+    next.append_tags = false;
+    return { payload: next, changed: true, added: false, removed: true };
   }
 
-  const sourceTags = new Set([DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG]);
   const otherSourceTags = new Set([...sourceTags].filter((tag) => tag !== sourceTag));
-  const existingTags = getTagNames(call).filter((tag) => !otherSourceTags.has(tag));
-  const currentAlreadyCorrect = existingTags.includes(sourceTag) && getTagNames(call).every((tag) => !otherSourceTags.has(tag));
-  if (currentAlreadyCorrect) {
-    return { payload, added: false };
+  const currentAlreadyCorrect = currentTags.includes(sourceTag) && currentTags.every((tag) => !otherSourceTags.has(tag));
+  if (!payloadHasTags && currentAlreadyCorrect) {
+    return { payload, changed: false, added: false };
   }
 
   const next = { ...payload };
-  const payloadTags = Array.isArray(next.tags) ? next.tags.filter(Boolean).filter((tag) => !otherSourceTags.has(tag)) : [];
+  const baseTags = payloadHasTags ? payloadTags : currentTags;
+  next.tags = [...new Set([...baseTags.filter((tag) => !sourceTags.has(tag)), sourceTag])];
+  next.append_tags = false;
 
-  if (payloadTags.length > 0) {
-    next.tags = [...new Set([...payloadTags, sourceTag])];
-    if (typeof next.append_tags !== 'boolean') {
-      next.append_tags = true;
-    }
-  } else if (next.append_tags === false) {
-    next.tags = [...new Set([...existingTags, sourceTag])];
-  } else {
-    next.tags = [sourceTag];
-    next.append_tags = true;
-  }
-
-  return { payload: next, added: true, tag: sourceTag };
+  return {
+    payload: next,
+    changed: true,
+    added: !currentTags.includes(sourceTag),
+    removed: currentTags.some((tag) => otherSourceTags.has(tag)),
+    tag: sourceTag,
+  };
 }
 
 function ensureOneOrTwoSentences(text) {
@@ -1358,8 +1368,12 @@ async function processSingleCall(config, call) {
       ? applySourceSecondaryTag(call, basePayload, { sourceTag: classification.source_tag })
       : { payload: basePayload, added: false };
   const payload = sourceTagResult.payload;
-  if (sourceTagResult.added) {
-    console.log(`Source attribution detected for ${call.id}; adding secondary tag "${sourceTagResult.tag}".`);
+  if (sourceTagResult.changed) {
+    if (sourceTagResult.tag) {
+      console.log(`Source attribution resolved for ${call.id}; setting secondary tag "${sourceTagResult.tag}".`);
+    } else {
+      console.log(`Source attribution resolved for ${call.id}; removing secondary source tags.`);
+    }
   }
 
   const duplicateBackfillCandidates =
@@ -1374,8 +1388,12 @@ async function processSingleCall(config, call) {
   }));
 
   const preview = formatDecisionPreview(call, classification, payload);
-  if (sourceTagResult.added) {
-    preview.source_tag_added = sourceTagResult.tag;
+  if (sourceTagResult.changed) {
+    if (sourceTagResult.tag) {
+      preview.source_tag_set = sourceTagResult.tag;
+    } else if (sourceTagResult.removed) {
+      preview.source_tag_removed = true;
+    }
   }
   if (duplicateBackfillPlan.length > 0) {
     preview.duplicate_backfill_updates = duplicateBackfillPlan;
