@@ -487,12 +487,17 @@ function detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls) {
   const strongPatterns = [
     /\bi('m| am)?\s*an?\s*existing client\b/i,
     /\bi('m| am)\s+the client\b/i,
+    /\bi\s+(currently\s+)?have\s+(an?\s+)?case\s+with\s+(you|you guys|your firm|brumley)\b/i,
     /\bi('d| would| want to)?\s*like to talk to (my|the) lawyer\b/i,
     /\bregarding (my|the) case\b/i,
+    /\bwhere\s+we\s+are\s+with\s+(my|the)\s+case\b/i,
+    /\bwho\s+is\s+in\s+charge\s+of\s+(my|the)\s+case\b/i,
     /\balready (have|got) (an )?attorney\b/i,
     /\byou (already|still) represent me\b/i,
     /\bcase manager\b/i,
+    /\bcase handler\b/i,
     /\bupdate on (my )?case\b/i,
+    /\bcase update\b/i,
     /\bstatus of (my )?case\b/i,
     /\bfollow(?:ing)? up (on|about)?\b/i,
     /\bcalled (back|again)\b/i,
@@ -582,8 +587,14 @@ function enforceQualificationGuardrails(classification, call, sameNumberOtherCal
 }
 
 function hasPotentialMvaContext(call) {
-  const transcript = String(call?.transcription ?? '').toLowerCase();
+  const transcript = String(call?.transcription ?? '');
   if (!transcript) return false;
+  const participantText = extractParticipantUtterances(transcript, ['Caller', 'Customer', 'Client'])
+    .replace(/\s+/g, ' ')
+    .trim();
+  const hasSpeakerLabels = /\b(agent|caller|customer|client)\s*:/i.test(transcript);
+  const text = (hasSpeakerLabels ? participantText : transcript).toLowerCase();
+  if (!text) return false;
 
   const mvaPatterns = [
     /\baccident\b/,
@@ -599,7 +610,7 @@ function hasPotentialMvaContext(call) {
     /\bfreeway\b/,
   ];
 
-  return mvaPatterns.some((re) => re.test(transcript));
+  return mvaPatterns.some((re) => re.test(text));
 }
 
 function getCallerNarrativeText(call) {
