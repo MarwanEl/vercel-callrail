@@ -490,6 +490,11 @@ function detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls) {
     /\bi('m| am)?\s*an?\s*existing client\b/i,
     /\bi('m| am)\s+the client\b/i,
     /\bi\s+(currently\s+)?have\s+(an?\s+)?case\s+with\s+(you|you guys|your firm|brumley)\b/i,
+    /\bmy\s+current\s+attorney\b/i,
+    /\bwho\s+my\s+current\s+attorney\s+is\b/i,
+    /\bmy\s+attorney\b/i,
+    /\bcase\s+is\s+(like\s+)?still\s+ongoing\b/i,
+    /\bmedical\s+provider\b[\s\S]{0,160}\bcase\s+is\s+(like\s+)?still\s+ongoing\b/i,
     /\bi('d| would| want to)?\s*like to talk to (my|the) lawyer\b/i,
     /\bregarding (my|the) case\b/i,
     /\bwhere\s+we\s+are\s+with\s+(my|the)\s+case\b/i,
@@ -507,6 +512,11 @@ function detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls) {
     /\bhasn'?t (called|reached|contacted) me back\b/i,
     /\breturn (my )?call\b/i,
   ];
+  const fullExchangePatterns = [
+    /\byou'?re\s+a\s+client\s+with\s+us\b[\s\S]{0,120}\bCaller:\s*(yes|yeah)\b/i,
+    /\byour\s+attorney'?s\s+name\s+is\b[\s\S]{0,120}\bCaller:\s*(okay|yes|yeah|perfect)\b/i,
+    /\blegal\s+assistant\s+for\s+your\s+case\b/i,
+  ];
   const newIntakePatterns = [
     /\blooking for (an?|a)\s+accident lawyer\b/i,
     /\bi was (rear[- ]?ended|hit|in an accident)\b/i,
@@ -517,13 +527,16 @@ function detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls) {
     /\bcyclist\b/i,
   ];
 
-  const strongHits = strongPatterns.filter((re) => re.test(callerOrFullText)).length;
+  const strongHits =
+    strongPatterns.filter((re) => re.test(callerOrFullText)).length +
+    fullExchangePatterns.filter((re) => re.test(transcript)).length;
   const hasPriorCalls = Array.isArray(sameNumberOtherCalls) && sameNumberOtherCalls.length > 0;
-  const hasPriorQualifiedCall = hasPriorCalls && sameNumberOtherCalls.some((c) => isQualifiedLead(c));
+  const hasPriorQualifiedCall =
+    hasPriorCalls && sameNumberOtherCalls.some((c) => c?.id !== call?.id && isQualifiedLead(c));
   const hasNewIntakeSignal = newIntakePatterns.some((re) => re.test(callerOrFullText));
 
-  // If caller language indicates new intake, do not auto-tag as existing client.
-  if (hasNewIntakeSignal) {
+  // If caller language only indicates new intake, do not auto-tag as existing client.
+  if (hasNewIntakeSignal && strongHits === 0 && !hasPriorQualifiedCall) {
     return null;
   }
 
@@ -688,7 +701,12 @@ function detectClientRejectedByAgent(call) {
     /\bsorry\s+that\s+we\s+(won't|will\s+not|can't|cannot|can\s+not)\s+be\s+able\s+to\s+help\b/i,
     /\b(we|i)\s+(do\s+not|don't)\s+think\s+we\s+would\s+be\s+able\s+to\s+(represent|take|handle|help)\b/i,
     /\b(we|i)\s+(won't|will\s+not|wouldn't|would\s+not|can't|cannot|can\s+not)\s+(represent|take|handle)\b/i,
+    /\b(we|i)\s+(won't|will\s+not|wouldn't|would\s+not|can't|cannot|can\s+not)\s+be\s+able\s+to\s+(represent|take|handle)\b/i,
     /\bnot\s+a\s+case\s+we\s+(would\s+be\s+able\s+to\s+take|can\s+take|handle)\b/i,
+    /\bwe'?re\s+a\s+bodily\s+injury\s+firm\b[\s\S]{0,240}\b(typically\s+only\s+take|only\s+take|client\s+was\s+injured|injured\s+in\s+a\s+car\s+accident)\b/i,
+    /\bwhat\s+you'?re\s+going\s+to\s+be\s+looking\s+for\s+is\s+going\s+to\s+be\s+a\s+traffic\s+attorney\b/i,
+    /\btraffic\s+attorney\b[\s\S]{0,160}\b(ticket|infraction|misdemeanor|suspension)\b/i,
+    /\bwe\s+only\s+represent\s+the\s+non[- ]?liable\s+party\b[\s\S]{0,180}\bwouldn'?t\s+be\s+able\s+to\s+take\b/i,
     /\bwe\s+represent\s+the\s+not\s+at\s+fault\s+part(?:y|ies)\b[\s\S]{0,220}\b(refer|avvo|defense|deny|liability|challenging)\b/i,
     /\brefer\s+you\s+to\s+(a\s+)?website\b[\s\S]{0,160}\b(avvo|appropriate representation|attorney|defense)\b/i,
   ];
@@ -738,6 +756,10 @@ function getAggressiveQualificationOverride(call, sameNumberOtherCalls) {
   if (!text) return null;
   if (detectClientRejectedByAgent(call)) return null;
   if (detectNoBodilyInjuryDisqualification(call)) return null;
+  if (/\bi\s+(didn'?t|did\s+not)\s+get\s+into\s+the\s+accident\b/i.test(text)) return null;
+  if (/\bi\s+(wasn'?t|was\s+not)\s+in\s+the\s+car\b/i.test(text)) return null;
+  if (/\bmy\s+license\s+was\s+suspended\b/i.test(text)) return null;
+  if (/\bit\s+was\s+my\s+(brother|sister|friend|parent|mom|mother|dad|father)\b/i.test(text)) return null;
   if (!hasFirstPartyMvaNarrative(text)) return null;
   if (hasSelfFaultAdmission(text)) return null;
 
