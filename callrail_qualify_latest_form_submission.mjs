@@ -292,6 +292,17 @@ function normalizeSourceSummary(text) {
   return `Source: ${sentence}`;
 }
 
+function normalizeEvidenceText(text) {
+  const cleaned = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (/^(none|null|n\/a|not discussed|unknown)$/i.test(cleaned)) return '';
+  const withoutPrefix = cleaned.replace(/^(source|evidence)\s*:\s*/i, '').trim();
+  if (!withoutPrefix) return '';
+  return /[.!?]$/.test(withoutPrefix) ? withoutPrefix : `${withoutPrefix}.`;
+}
+
 function appendSourceSummaryToNote(summaryNote, sourceSummary) {
   const note = String(summaryNote || '').trim();
   const source = normalizeSourceSummary(sourceSummary);
@@ -503,64 +514,18 @@ function detectCallerDisconnectedHeuristic(call) {
   return null;
 }
 
-function detectExistingClientDuplicateHeuristic(call, sameContactOtherForms) {
-  const text = getFormTextForClassification(call).toLowerCase();
-  if (!text) return null;
-
-  const explicitExistingPatterns = [
-    /\bexisting client\b/i,
-    /\bcurrent client\b/i,
-    /\bupdate on (my )?case\b/i,
-    /\bstatus of (my )?case\b/i,
-    /\bfollow(?:ing)? up\b/i,
-    /\balready have (an )?attorney\b/i,
-    /\byou represent me\b/i,
-  ];
-  const ambiguousExistingPatterns = [/\bmy case manager\b/i, /\bmy attorney\b/i];
-  const newIntakePatterns = [
-    /\bcar accident\b/i,
-    /\bmotorcycle accident\b/i,
-    /\btruck accident\b/i,
-    /\brear[- ]?ended\b/i,
-    /\bpedestrian\b/i,
-    /\bcyclist\b/i,
-    /\bi was hit\b/i,
-    /\bnot at fault\b/i,
-  ];
-
-  const explicitHits = explicitExistingPatterns.filter((re) => re.test(text)).length;
-  const ambiguousHits = ambiguousExistingPatterns.filter((re) => re.test(text)).length;
-  const hasPriorForms = Array.isArray(sameContactOtherForms) && sameContactOtherForms.length > 0;
-  const hasPriorQualifiedForm = hasPriorForms && sameContactOtherForms.some((c) => isQualifiedLead(c));
-  const hasNewIntakeSignal = newIntakePatterns.some((re) => re.test(text));
-
-  if (hasNewIntakeSignal && !hasPriorQualifiedForm) return null;
-
-  if (explicitHits >= 1 || hasPriorQualifiedForm || (ambiguousHits >= 1 && hasPriorForms)) {
-    return {
-      decision: 'tag_only',
-      tag: DUPLICATE_TAG,
-      lead_status: null,
-      confidence: 0.98,
-      summary_note:
-        'This form appears to be an existing-client follow-up or duplicate submission, so it was tagged as Existing Client/Duplicate.',
-      source: 'heuristic_existing_client_followup',
-    };
-  }
-
-  return null;
-}
-
 function enforceQualificationGuardrails(classification, call, sameContactOtherForms) {
   if (classification.decision !== 'qualified') {
     return classification;
   }
 
-  const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, sameContactOtherForms);
-  if (existingClientHeuristic) {
+  if (classification.existing_client) {
     return normalizeClassification({
-      ...existingClientHeuristic,
-      source: 'guardrail_existing_client_override',
+      ...classification,
+      decision: 'tag_only',
+      tag: DUPLICATE_TAG,
+      lead_status: null,
+      source: 'guardrail_existing_client_model_reasoning',
     });
   }
 
@@ -605,9 +570,9 @@ function enforceHumanReviewGuardrails(classification, call) {
   return classification;
 }
 
-function canUseDuplicateTag(call, priorSameContactForms, existingClientHeuristic) {
-  if (existingClientHeuristic) return true;
+function canUseDuplicateTag(call, priorSameContactForms, classification = null) {
   if (Array.isArray(priorSameContactForms) && priorSameContactForms.some((c) => isQualifiedLead(c))) return true;
+  if (classification?.existing_client === true && classification?.existing_client_evidence) return true;
   return false;
 }
 
@@ -901,6 +866,14 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
       ? '- IMPORTANT: For this classification pass, do NOT use Existing Client/Duplicate.'
       : '',
     '',
+    'Reasoning field rules:',
+    '- Set is_motor_vehicle_accident based on the form facts, not generic firm branding, landing pages, or unrelated page text.',
+    '- Set existing_client using semantic reasoning from the full form content and same-contact history. Do not rely on exact keywords only.',
+    '- Set existing_client_evidence to a short quote or paraphrase explaining why this is or is not an existing/open/prior BLF matter.',
+    '- Set agent_declined_case false for form submissions unless the form itself clearly states BLF already declined the matter.',
+    '- Set caller_appears_at_fault true only when the submitter/injured party appears liable or caused the crash.',
+    '- Set disqualifying_evidence to the strongest reason this is not qualified, or null if none.',
+    '',
     'Source attribution rules for source_tag (only use for decision=qualified; otherwise null):',
     `- ${REFERRAL_SOURCE_TAG}: submitter clearly says Brumley was recommended/referred directly by a friend, family member, coworker, employer/employee, attorney/lawyer, chiropractor/doctor/clinic/provider, prior client, or word of mouth. Use this only when that person/source appears to have already known or recommended Brumley directly.`,
     `- ${DUAL_SOURCE_TAG}: source chain is mixed or unclear, such as both Google/social/web search and word-of-mouth/referral being mentioned, or the submitter says they were told by someone but also found/confirmed Brumley online and it is not clear which source was original.`,
@@ -961,6 +934,24 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
           minimum: 0,
           maximum: 1,
         },
+        is_motor_vehicle_accident: {
+          type: 'boolean',
+        },
+        existing_client: {
+          type: 'boolean',
+        },
+        existing_client_evidence: {
+          type: ['string', 'null'],
+        },
+        agent_declined_case: {
+          type: 'boolean',
+        },
+        caller_appears_at_fault: {
+          type: 'boolean',
+        },
+        disqualifying_evidence: {
+          type: ['string', 'null'],
+        },
         source_tag: {
           type: ['string', 'null'],
           enum: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG, null],
@@ -969,7 +960,20 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
           type: ['string', 'null'],
         },
       },
-      required: ['decision', 'tag', 'summary_note', 'confidence', 'source_tag', 'source_summary'],
+      required: [
+        'decision',
+        'tag',
+        'summary_note',
+        'confidence',
+        'is_motor_vehicle_accident',
+        'existing_client',
+        'existing_client_evidence',
+        'agent_declined_case',
+        'caller_appears_at_fault',
+        'disqualifying_evidence',
+        'source_tag',
+        'source_summary',
+      ],
     },
   };
 
@@ -1025,6 +1029,12 @@ function normalizeClassification(raw) {
     lead_status: null,
     summary_note: ensureOneOrTwoSentences(raw.summary_note),
     confidence: Number(raw.confidence),
+    is_motor_vehicle_accident: raw.is_motor_vehicle_accident === true,
+    existing_client: raw.existing_client === true,
+    existing_client_evidence: normalizeEvidenceText(raw.existing_client_evidence),
+    agent_declined_case: raw.agent_declined_case === true,
+    caller_appears_at_fault: raw.caller_appears_at_fault === true,
+    disqualifying_evidence: normalizeEvidenceText(raw.disqualifying_evidence),
     source_tag: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG].includes(raw.source_tag) ? raw.source_tag : null,
     source_summary: normalizeSourceSummary(raw.source_summary),
     source: typeof raw.source === 'string' ? raw.source : 'openai',
@@ -1032,6 +1042,11 @@ function normalizeClassification(raw) {
 
   if (!['qualified', 'tag_only'].includes(result.decision)) {
     result.decision = 'tag_only';
+  }
+
+  if (result.existing_client) {
+    result.decision = 'tag_only';
+    result.tag = DUPLICATE_TAG;
   }
 
   if (result.decision === 'qualified') {
@@ -1184,6 +1199,14 @@ function formatDecisionPreview(call, classification, payload) {
     lead_status_to_set: classification.lead_status,
     confidence: classification.confidence,
     classification_source: classification.source ?? 'openai',
+    reasoning: {
+      is_motor_vehicle_accident: classification.is_motor_vehicle_accident,
+      existing_client: classification.existing_client,
+      existing_client_evidence: classification.existing_client_evidence,
+      agent_declined_case: classification.agent_declined_case,
+      caller_appears_at_fault: classification.caller_appears_at_fault,
+      disqualifying_evidence: classification.disqualifying_evidence,
+    },
     note: classification.summary_note,
     update_payload: payload,
   };
@@ -1255,14 +1278,10 @@ async function processSingleCall(config, call) {
 
   const heuristicClassification = detectCallerDisconnectedHeuristic(call);
   let classification;
-  const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, priorSameNumberCalls);
   const callForClassification = config.force ? { ...call, tags: [], note: null } : call;
   if (heuristicClassification) {
     console.log(`Heuristic classification matched for ${call.id}: ${heuristicClassification.source}`);
     classification = normalizeClassification(heuristicClassification);
-  } else if (existingClientHeuristic) {
-    console.log(`Heuristic classification matched for ${call.id}: ${existingClientHeuristic.source}`);
-    classification = normalizeClassification(existingClientHeuristic);
   } else {
     console.log(`Classifying form ${call.id} with model ${config.model}...`);
     const rawClassification = await classifyCall(config, callForClassification, priorSameNumberCalls);
@@ -1270,7 +1289,7 @@ async function processSingleCall(config, call) {
     classification = enforceQualificationGuardrails(classification, call, priorSameNumberCalls);
     classification = enforceHumanReviewGuardrails(classification, call);
 
-    const duplicateAllowed = canUseDuplicateTag(call, priorSameNumberCalls, existingClientHeuristic);
+    const duplicateAllowed = canUseDuplicateTag(call, priorSameNumberCalls, classification);
     if (classification.decision === 'tag_only' && classification.tag === DUPLICATE_TAG && !duplicateAllowed) {
       console.log(`Duplicate tag not allowed for ${call.id} (no duplicate evidence). Reclassifying without duplicate option...`);
       const retryRaw = await classifyCall(config, callForClassification, priorSameNumberCalls, {
@@ -1285,13 +1304,6 @@ async function processSingleCall(config, call) {
     }
   }
 
-  if (classification.decision === 'tag_only' && classification.tag === HUMAN_REVIEW_TAG) {
-    const lateExistingClientCheck = detectExistingClientDuplicateHeuristic(call, priorSameNumberCalls);
-    if (lateExistingClientCheck) {
-      console.log(`Human Review overridden by existing-client heuristic for ${call.id}.`);
-      classification = normalizeClassification(lateExistingClientCheck);
-    }
-  }
   classification = enforceReferralSourceNotQualified(classification);
 
   const basePayload = buildUpdatePayload(call, classification, {

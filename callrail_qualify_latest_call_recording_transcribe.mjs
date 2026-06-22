@@ -412,6 +412,17 @@ function normalizeSourceSummary(text) {
   return `Source: ${sentence}`;
 }
 
+function normalizeEvidenceText(text) {
+  const cleaned = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (/^(none|null|n\/a|not discussed|unknown)$/i.test(cleaned)) return '';
+  const withoutPrefix = cleaned.replace(/^(source|evidence)\s*:\s*/i, '').trim();
+  if (!withoutPrefix) return '';
+  return /[.!?]$/.test(withoutPrefix) ? withoutPrefix : `${withoutPrefix}.`;
+}
+
 function appendSourceSummaryToNote(summaryNote, sourceSummary) {
   const note = String(summaryNote || '').trim();
   const source = normalizeSourceSummary(sourceSummary);
@@ -494,86 +505,6 @@ function detectCallerDisconnectedHeuristic(call) {
   return null;
 }
 
-function detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls) {
-  const transcript = String(call?.transcription ?? '').trim();
-  const text = transcript.toLowerCase().replace(/\s+/g, ' ');
-  if (!text) return null;
-
-  const callerText = extractParticipantUtterances(transcript, ['Caller', 'Customer', 'Client'])
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-  const callerOrFullText = callerText || text;
-
-  const strongPatterns = [
-    /\bi('m| am)?\s*an?\s*existing client\b/i,
-    /\bi('m| am)\s+the client\b/i,
-    /\bi\s+(currently\s+)?have\s+(an?\s+)?case\s+with\s+(you|you guys|your firm|brumley)\b/i,
-    /\bmy\s+current\s+attorney\b/i,
-    /\bwho\s+my\s+current\s+attorney\s+is\b/i,
-    /\bmy\s+attorney\b/i,
-    /\bcase\s+is\s+(like\s+)?still\s+ongoing\b/i,
-    /\bmedical\s+provider\b[\s\S]{0,160}\bcase\s+is\s+(like\s+)?still\s+ongoing\b/i,
-    /\bi('d| would| want to)?\s*like to talk to (my|the) lawyer\b/i,
-    /\bregarding (my|the) case\b/i,
-    /\bwhere\s+we\s+are\s+with\s+(my|the)\s+case\b/i,
-    /\bwho\s+is\s+in\s+charge\s+of\s+(my|the)\s+case\b/i,
-    /\balready (have|got) (an )?attorney\b/i,
-    /\byou (already|still) represent me\b/i,
-    /\bcase manager\b/i,
-    /\bcase handler\b/i,
-    /\bupdate on (my )?case\b/i,
-    /\bcase update\b/i,
-    /\bstatus of (my )?case\b/i,
-    /\bfollow(?:ing)? up (on|about)?\b/i,
-    /\bcalled (back|again)\b/i,
-    /\bnot receiving updates?\b/i,
-    /\bhasn'?t (called|reached|contacted) me back\b/i,
-    /\breturn (my )?call\b/i,
-  ];
-  const fullExchangePatterns = [
-    /\byou'?re\s+a\s+client\s+with\s+us\b[\s\S]{0,120}\bCaller:\s*(yes|yeah)\b/i,
-    /\byour\s+attorney'?s\s+name\s+is\b[\s\S]{0,120}\bCaller:\s*(okay|yes|yeah|perfect)\b/i,
-    /\blegal\s+assistant\s+for\s+your\s+case\b/i,
-  ];
-  const newIntakePatterns = [
-    /\blooking for (an?|a)\s+accident lawyer\b/i,
-    /\bi was (rear[- ]?ended|hit|in an accident)\b/i,
-    /\bcar accident\b/i,
-    /\btruck accident\b/i,
-    /\bmotorcycle accident\b/i,
-    /\bpedestrian\b/i,
-    /\bcyclist\b/i,
-  ];
-
-  const strongHits =
-    strongPatterns.filter((re) => re.test(callerOrFullText)).length +
-    fullExchangePatterns.filter((re) => re.test(transcript)).length;
-  const hasPriorCalls = Array.isArray(sameNumberOtherCalls) && sameNumberOtherCalls.length > 0;
-  const hasPriorQualifiedCall =
-    hasPriorCalls && sameNumberOtherCalls.some((c) => c?.id !== call?.id && isQualifiedLead(c));
-  const hasNewIntakeSignal = newIntakePatterns.some((re) => re.test(callerOrFullText));
-
-  // If caller language only indicates new intake, do not auto-tag as existing client.
-  if (hasNewIntakeSignal && strongHits === 0 && !hasPriorQualifiedCall) {
-    return null;
-  }
-
-  if (strongHits >= 1 || hasPriorQualifiedCall) {
-    return {
-      decision: 'tag_only',
-      tag: DUPLICATE_TAG,
-      lead_status: null,
-      confidence: 0.98,
-      summary_note:
-        'The caller appears to be an existing client or follow-up contact about an existing matter, so this was tagged as Existing Client/Duplicate.',
-      source: 'heuristic_existing_client_followup',
-    };
-  }
-
-  return null;
-}
-
 function extractSpeakerUtterances(transcript, speaker) {
   const text = String(transcript || '');
   const escapedSpeaker = speaker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -614,11 +545,13 @@ function enforceQualificationGuardrails(classification, call, sameNumberOtherCal
     return normalizeClassification(noInjuryDisqualification);
   }
 
-  const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls);
-  if (existingClientHeuristic) {
+  if (classification.existing_client) {
     return normalizeClassification({
-      ...existingClientHeuristic,
-      source: 'guardrail_existing_client_override',
+      ...classification,
+      decision: 'tag_only',
+      tag: DUPLICATE_TAG,
+      lead_status: null,
+      source: 'guardrail_existing_client_model_reasoning',
     });
   }
 
@@ -650,15 +583,6 @@ function hasPotentialMvaContext(call) {
   ];
 
   return mvaPatterns.some((re) => re.test(text));
-}
-
-function getCallerNarrativeText(call) {
-  const transcript = String(call?.transcription ?? '').trim();
-  if (!transcript) return '';
-  const callerText = extractParticipantUtterances(transcript, ['Caller', 'Customer', 'Client'])
-    .replace(/\s+/g, ' ')
-    .trim();
-  return callerText || transcript.replace(/\s+/g, ' ').trim();
 }
 
 function detectNoBodilyInjuryDisqualification(call) {
@@ -743,61 +667,6 @@ function detectClientRejectedByAgent(call) {
   };
 }
 
-function hasSelfFaultAdmission(text) {
-  const selfFaultPatterns = [
-    /\b(my fault|i (was|am) at fault)\b/i,
-    /\bi (rear[- ]?ended|hit|struck|sideswiped|t[- ]?boned)\s+(them|him|her|another (car|vehicle)|the other (car|vehicle)|someone)\b/i,
-    /\bi (ran|blew)\s+(a )?(red light|stop sign)\b/i,
-    /\bi (was )?speeding\b/i,
-    /\bi (caused|causing)\s+(the )?(accident|crash|collision)\b/i,
-  ];
-  return selfFaultPatterns.some((re) => re.test(text));
-}
-
-function hasFirstPartyMvaNarrative(text) {
-  const vehicleContext = /\b(car|vehicle|truck|motorcycle|semi|bus|driver|passenger|rear[- ]?end|sideswipe|t[- ]?bone|collision|crash|freeway|road|lane|intersection|stop sign|traffic|insurance|police report)\b/i;
-  if (!vehicleContext.test(text)) return false;
-
-  const narrativePatterns = [
-    /\bi was (rear[- ]?ended|sideswiped|t[- ]?boned|in an accident|in a crash)\b/i,
-    /\bi was hit\b[\s\S]{0,80}\b(by|with)\b[\s\S]{0,80}\b(car|vehicle|truck|motorcycle|bus|driver)\b/i,
-    /\bi got hit\b[\s\S]{0,80}\b(by|with)\b[\s\S]{0,80}\b(car|vehicle|truck|motorcycle|bus|driver)\b/i,
-    /\bsomeone (hit|rear[- ]?ended|sideswiped|t[- ]?boned) (me|my (car|vehicle))\b/i,
-    /\b(my|our)\s+(car|vehicle|truck|motorcycle)\b[\s\S]{0,60}\b(hit|rear[- ]?ended|sideswiped|t[- ]?boned|crash|accident|collision)\b/i,
-    /\b(accident|crash|collision)\b[\s\S]{0,80}\b(my|our|me|we)\b/i,
-  ];
-  return narrativePatterns.some((re) => re.test(text));
-}
-
-function getAggressiveQualificationOverride(call, sameNumberOtherCalls) {
-  const transcript = String(call?.transcription ?? '').trim();
-  if (!transcript) return null;
-
-  const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls);
-  if (existingClientHeuristic) return null;
-
-  const text = getCallerNarrativeText(call);
-  if (!text) return null;
-  if (detectClientRejectedByAgent(call)) return null;
-  if (detectNoBodilyInjuryDisqualification(call)) return null;
-  if (/\bi\s+(didn'?t|did\s+not)\s+get\s+into\s+the\s+accident\b/i.test(text)) return null;
-  if (/\bi\s+(wasn'?t|was\s+not)\s+in\s+the\s+car\b/i.test(text)) return null;
-  if (/\bmy\s+license\s+was\s+suspended\b/i.test(text)) return null;
-  if (/\bit\s+was\s+my\s+(brother|sister|friend|parent|mom|mother|dad|father)\b/i.test(text)) return null;
-  if (!hasFirstPartyMvaNarrative(text)) return null;
-  if (hasSelfFaultAdmission(text)) return null;
-
-  return normalizeClassification({
-    decision: 'qualified',
-    tag: null,
-    lead_status: 'good_lead',
-    confidence: 0.9,
-    summary_note:
-      'Caller narrative indicates a motor vehicle accident where the caller does not clearly admit fault, so this was auto-qualified.',
-    source: 'guardrail_assume_qualified_unless_self_fault',
-  });
-}
-
 function enforceHumanReviewGuardrails(classification, call) {
   if (classification.decision === 'qualified') return classification;
 
@@ -877,9 +746,9 @@ function hasExplicitExistingClientSummary(classification) {
   return patterns.some((re) => re.test(note));
 }
 
-function canUseDuplicateTag(call, priorSameNumberCalls, existingClientHeuristic, classification = null) {
-  if (existingClientHeuristic) return true;
+function canUseDuplicateTag(call, priorSameNumberCalls, classification = null) {
   if (Array.isArray(priorSameNumberCalls) && priorSameNumberCalls.some((c) => isQualifiedLead(c))) return true;
+  if (classification?.existing_client === true && classification?.existing_client_evidence) return true;
   if (classification?.tag === DUPLICATE_TAG && hasExplicitExistingClientSummary(classification)) return true;
   return false;
 }
@@ -1260,6 +1129,14 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
       ? '- IMPORTANT: For this classification pass, do NOT use Existing Client/Duplicate.'
       : '',
     '',
+    'Reasoning field rules:',
+    '- Set is_motor_vehicle_accident based on the caller/agent facts, not hold music, IVR menus, firm ads, or generic car-crash branding.',
+    '- Set existing_client using semantic reasoning from the full transcript and call history. Do not rely on exact keywords only.',
+    '- Set existing_client_evidence to a short quote or paraphrase explaining why this is or is not an existing/open/prior BLF matter.',
+    '- Set agent_declined_case true if BLF says it cannot help, cannot represent, cannot take the case, or refers the caller elsewhere after reviewing the facts.',
+    '- Set caller_appears_at_fault true only when the caller/injured party appears liable or caused the crash.',
+    '- Set disqualifying_evidence to the strongest reason this is not qualified, or null if none.',
+    '',
     'Source attribution rules for source_tag (only use for decision=qualified; otherwise null):',
     `- ${REFERRAL_SOURCE_TAG}: caller clearly says Brumley was recommended/referred directly by a friend, family member, coworker, employer/employee, attorney/lawyer, chiropractor/doctor/clinic/provider, prior client, or word of mouth. Use this only when that person/source appears to have already known or recommended Brumley directly.`,
     `- ${DUAL_SOURCE_TAG}: source chain is mixed or unclear, such as both Google/social/web search and word-of-mouth/referral being mentioned, or the caller says they were told by someone but also found/confirmed Brumley online and it is not clear which source was original.`,
@@ -1320,6 +1197,24 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
           minimum: 0,
           maximum: 1,
         },
+        is_motor_vehicle_accident: {
+          type: 'boolean',
+        },
+        existing_client: {
+          type: 'boolean',
+        },
+        existing_client_evidence: {
+          type: ['string', 'null'],
+        },
+        agent_declined_case: {
+          type: 'boolean',
+        },
+        caller_appears_at_fault: {
+          type: 'boolean',
+        },
+        disqualifying_evidence: {
+          type: ['string', 'null'],
+        },
         source_tag: {
           type: ['string', 'null'],
           enum: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG, null],
@@ -1328,7 +1223,20 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
           type: ['string', 'null'],
         },
       },
-      required: ['decision', 'tag', 'summary_note', 'confidence', 'source_tag', 'source_summary'],
+      required: [
+        'decision',
+        'tag',
+        'summary_note',
+        'confidence',
+        'is_motor_vehicle_accident',
+        'existing_client',
+        'existing_client_evidence',
+        'agent_declined_case',
+        'caller_appears_at_fault',
+        'disqualifying_evidence',
+        'source_tag',
+        'source_summary',
+      ],
     },
   };
 
@@ -1384,6 +1292,12 @@ function normalizeClassification(raw) {
     lead_status: null,
     summary_note: ensureOneOrTwoSentences(raw.summary_note),
     confidence: Number(raw.confidence),
+    is_motor_vehicle_accident: raw.is_motor_vehicle_accident === true,
+    existing_client: raw.existing_client === true,
+    existing_client_evidence: normalizeEvidenceText(raw.existing_client_evidence),
+    agent_declined_case: raw.agent_declined_case === true,
+    caller_appears_at_fault: raw.caller_appears_at_fault === true,
+    disqualifying_evidence: normalizeEvidenceText(raw.disqualifying_evidence),
     source_tag: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG].includes(raw.source_tag) ? raw.source_tag : null,
     source_summary: normalizeSourceSummary(raw.source_summary),
     source: typeof raw.source === 'string' ? raw.source : 'openai',
@@ -1391,6 +1305,11 @@ function normalizeClassification(raw) {
 
   if (!['qualified', 'tag_only'].includes(result.decision)) {
     result.decision = 'tag_only';
+  }
+
+  if (result.existing_client) {
+    result.decision = 'tag_only';
+    result.tag = DUPLICATE_TAG;
   }
 
   if (result.decision === 'qualified') {
@@ -1542,6 +1461,14 @@ function formatDecisionPreview(call, classification, payload) {
     lead_status_to_set: classification.lead_status,
     confidence: classification.confidence,
     classification_source: classification.source ?? 'openai',
+    reasoning: {
+      is_motor_vehicle_accident: classification.is_motor_vehicle_accident,
+      existing_client: classification.existing_client,
+      existing_client_evidence: classification.existing_client_evidence,
+      agent_declined_case: classification.agent_declined_case,
+      caller_appears_at_fault: classification.caller_appears_at_fault,
+      disqualifying_evidence: classification.disqualifying_evidence,
+    },
     note: classification.summary_note,
     update_payload: payload,
   };
@@ -1619,22 +1546,14 @@ async function processSingleCall(config, call) {
 
   const heuristicClassification = detectCallerDisconnectedHeuristic(analysisCall);
   let classification;
-  const existingClientHeuristic = detectExistingClientDuplicateHeuristic(analysisCall, priorSameNumberCalls);
   const clientRejected = detectClientRejectedByAgent(analysisCall);
-  const noInjuryDisqualification = detectNoBodilyInjuryDisqualification(analysisCall);
   const callForClassification = config.force ? { ...analysisCall, tags: [], note: null } : analysisCall;
   if (heuristicClassification) {
     console.log(`Heuristic classification matched for ${call.id}: ${heuristicClassification.source}`);
     classification = normalizeClassification(heuristicClassification);
-  } else if (existingClientHeuristic) {
-    console.log(`Heuristic classification matched for ${call.id}: ${existingClientHeuristic.source}`);
-    classification = normalizeClassification(existingClientHeuristic);
   } else if (clientRejected) {
     console.log(`Heuristic classification matched for ${call.id}: ${clientRejected.source}`);
     classification = normalizeClassification(clientRejected);
-  } else if (noInjuryDisqualification) {
-    console.log(`Heuristic classification matched for ${call.id}: ${noInjuryDisqualification.source}`);
-    classification = normalizeClassification(noInjuryDisqualification);
   } else {
     console.log(`Classifying call ${call.id} with model ${config.model}...`);
     const rawClassification = await classifyCall(config, callForClassification, priorSameNumberCalls);
@@ -1642,18 +1561,7 @@ async function processSingleCall(config, call) {
     classification = enforceQualificationGuardrails(classification, analysisCall, priorSameNumberCalls);
     classification = enforceHumanReviewGuardrails(classification, analysisCall);
     classification = enforceMissingTranscriptGuardrails(classification, analysisCall);
-    const aggressiveQualification = getAggressiveQualificationOverride(analysisCall, priorSameNumberCalls);
-    if (aggressiveQualification) {
-      aggressiveQualification.source_tag = classification.source_tag;
-      aggressiveQualification.source_summary = classification.source_summary;
-      aggressiveQualification.summary_note = appendSourceSummaryToNote(
-        aggressiveQualification.summary_note,
-        classification.source_summary
-      );
-      classification = aggressiveQualification;
-    }
-
-    const duplicateAllowed = canUseDuplicateTag(analysisCall, priorSameNumberCalls, existingClientHeuristic, classification);
+    const duplicateAllowed = canUseDuplicateTag(analysisCall, priorSameNumberCalls, classification);
     if (classification.decision === 'tag_only' && classification.tag === DUPLICATE_TAG && !duplicateAllowed) {
       console.log(`Duplicate tag not allowed for ${call.id} (no duplicate evidence). Reclassifying without duplicate option...`);
       const retryRaw = await classifyCall(config, callForClassification, priorSameNumberCalls, {
@@ -1663,29 +1571,12 @@ async function processSingleCall(config, call) {
       classification = enforceQualificationGuardrails(classification, analysisCall, priorSameNumberCalls);
       classification = enforceHumanReviewGuardrails(classification, analysisCall);
       classification = enforceMissingTranscriptGuardrails(classification, analysisCall);
-      const aggressiveQualification = getAggressiveQualificationOverride(analysisCall, priorSameNumberCalls);
-      if (aggressiveQualification) {
-        aggressiveQualification.source_tag = classification.source_tag;
-        aggressiveQualification.source_summary = classification.source_summary;
-        aggressiveQualification.summary_note = appendSourceSummaryToNote(
-          aggressiveQualification.summary_note,
-          classification.source_summary
-        );
-        classification = aggressiveQualification;
-      }
       if (classification.source === 'openai') {
         classification.source = 'openai_no_duplicate_retry';
       }
     }
   }
 
-  if (classification.decision === 'tag_only' && classification.tag === HUMAN_REVIEW_TAG) {
-    const lateExistingClientCheck = detectExistingClientDuplicateHeuristic(analysisCall, priorSameNumberCalls);
-    if (lateExistingClientCheck) {
-      console.log(`Human Review overridden by existing-client heuristic for ${call.id}.`);
-      classification = normalizeClassification(lateExistingClientCheck);
-    }
-  }
   classification = enforceReferralSourceNotQualified(classification);
 
   const basePayload = buildUpdatePayload(call, classification, {
