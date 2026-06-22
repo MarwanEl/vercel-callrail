@@ -772,9 +772,38 @@ function enforceMissingTranscriptGuardrails(classification, call) {
   };
 }
 
-function canUseDuplicateTag(call, priorSameNumberCalls, existingClientHeuristic) {
+function hasExplicitExistingClientSummary(classification) {
+  const note = String(classification?.summary_note ?? '').toLowerCase();
+  if (!note) return false;
+  const patterns = [
+    /\bexisting client\b/,
+    /\bformer client\b/,
+    /\bcurrent client\b/,
+    /\bexisting case\b/,
+    /\bactive matter\b/,
+    /\bcase update\b/,
+    /\bcase status\b/,
+    /\bstatus update\b/,
+    /\bcase manager\b/,
+    /\bcase handler\b/,
+    /\bsettlement\b/,
+    /\bsettlement check\b/,
+    /\bpayment check\b/,
+    /\bclient file\b/,
+    /\bcase file\b/,
+    /\bfile transfer\b/,
+    /\bsubstitution letter\b/,
+    /\bpre[- ]?deposition\b/,
+    /\blop\b/,
+    /\bnot a new intake\b/,
+  ];
+  return patterns.some((re) => re.test(note));
+}
+
+function canUseDuplicateTag(call, priorSameNumberCalls, existingClientHeuristic, classification = null) {
   if (existingClientHeuristic) return true;
   if (Array.isArray(priorSameNumberCalls) && priorSameNumberCalls.some((c) => isQualifiedLead(c))) return true;
+  if (classification?.tag === DUPLICATE_TAG && hasExplicitExistingClientSummary(classification)) return true;
   return false;
 }
 
@@ -1511,7 +1540,7 @@ async function processSingleCall(config, call) {
       classification = aggressiveQualification;
     }
 
-    const duplicateAllowed = canUseDuplicateTag(analysisCall, priorSameNumberCalls, existingClientHeuristic);
+    const duplicateAllowed = canUseDuplicateTag(analysisCall, priorSameNumberCalls, existingClientHeuristic, classification);
     if (classification.decision === 'tag_only' && classification.tag === DUPLICATE_TAG && !duplicateAllowed) {
       console.log(`Duplicate tag not allowed for ${call.id} (no duplicate evidence). Reclassifying without duplicate option...`);
       const retryRaw = await classifyCall(config, callForClassification, priorSameNumberCalls, {
