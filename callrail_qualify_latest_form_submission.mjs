@@ -278,6 +278,26 @@ function ensureOneOrTwoSentences(text) {
   return /[.!?]$/.test(two) ? two : `${two}.`;
 }
 
+function normalizeSourceSummary(text) {
+  const cleaned = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (/^(none|null|n\/a|not discussed|unknown)$/i.test(cleaned)) return '';
+  const withoutPrefix = cleaned.replace(/^source\s*:\s*/i, '').trim();
+  if (!withoutPrefix) return '';
+  const sentence = /[.!?]$/.test(withoutPrefix) ? withoutPrefix : `${withoutPrefix}.`;
+  return `Source: ${sentence}`;
+}
+
+function appendSourceSummaryToNote(summaryNote, sourceSummary) {
+  const note = String(summaryNote || '').trim();
+  const source = normalizeSourceSummary(sourceSummary);
+  if (!source) return note;
+  if (/\bSource\s*:/i.test(note)) return note;
+  return `${note} ${source}`.trim();
+}
+
 function normalizeToken(text) {
   return String(text || '')
     .toLowerCase()
@@ -873,7 +893,12 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
     `- ${DUAL_SOURCE_TAG}: source chain is mixed or unclear, such as both Google/social/web search and word-of-mouth/referral being mentioned, or the submitter says they were told by someone but also found/confirmed Brumley online and it is not clear which source was original.`,
     '- null: no source discussed, existing client/duplicate/non-qualified, or clearly digital-only source. If a friend/family member merely found Brumley on Google/social and passed along the link/name, treat it as digital-only and use null.',
     '',
-    'Return 1-2 sentence summary_note.',
+    'Source note rules for source_summary:',
+    '- If the submitter says how they heard about or found BLF, return a short sentence explaining it, even when source_tag is null.',
+    '- Include form answers and narrative statements like "I heard about you from a friend."',
+    '- If no source is discussed, return null.',
+    '',
+    'Return 1-2 sentence summary_note about the case/routing decision. Keep source attribution in source_summary, not summary_note.',
     '',
     'FORM SUBMISSION JSON:',
     JSON.stringify(
@@ -927,8 +952,11 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
           type: ['string', 'null'],
           enum: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG, null],
         },
+        source_summary: {
+          type: ['string', 'null'],
+        },
       },
-      required: ['decision', 'tag', 'summary_note', 'confidence', 'source_tag'],
+      required: ['decision', 'tag', 'summary_note', 'confidence', 'source_tag', 'source_summary'],
     },
   };
 
@@ -985,6 +1013,7 @@ function normalizeClassification(raw) {
     summary_note: ensureOneOrTwoSentences(raw.summary_note),
     confidence: Number(raw.confidence),
     source_tag: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG].includes(raw.source_tag) ? raw.source_tag : null,
+    source_summary: normalizeSourceSummary(raw.source_summary),
     source: typeof raw.source === 'string' ? raw.source : 'openai',
   };
 
@@ -1019,6 +1048,8 @@ function normalizeClassification(raw) {
       result.summary_note = 'Form details did not meet qualification criteria and were tagged for follow-up routing.';
     }
   }
+
+  result.summary_note = appendSourceSummaryToNote(result.summary_note, result.source_summary);
 
   return result;
 }
