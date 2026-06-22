@@ -15,11 +15,13 @@ const TAGS = [
   'Human Review',
   'Other',
   'Unrelated Case',
+  'Client_Rejected',
 ];
 const DUPLICATE_TAG = 'Existing Client/Duplicate';
 const QUALIFIED_TAG = 'Qualified';
 const HUMAN_REVIEW_TAG = 'Human Review';
 const OTHER_TAG = 'Other';
+const CLIENT_REJECTED_TAG = 'Client_Rejected';
 const DUAL_SOURCE_TAG = 'Dual Source';
 const REFERRAL_SOURCE_TAG = 'Referral / Word of Mouth';
 const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG, DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG])];
@@ -885,6 +887,7 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
     '- SPAM: robocall/solicitation/scam.',
     '- Human Review: possible MVA intake but not enough clarity to decide qualification automatically (especially unclear fault/coverage).',
     '- Unrelated Case: legal matter outside MVA personal injury scope.',
+    `- ${CLIENT_REJECTED_TAG}: intake agent says BLF cannot help, cannot represent, cannot take the case, or refers the caller elsewhere after reviewing the facts.`,
     '- Other: non-MVA or miscellaneous non-intake items that do not fit any specific tag.',
     '',
     'Decision rules:',

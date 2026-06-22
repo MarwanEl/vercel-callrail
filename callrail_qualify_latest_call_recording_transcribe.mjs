@@ -16,11 +16,13 @@ const TAGS = [
   'Human Review',
   'Other',
   'Unrelated Case',
+  'Client_Rejected',
 ];
 const DUPLICATE_TAG = 'Existing Client/Duplicate';
 const QUALIFIED_TAG = 'Qualified';
 const HUMAN_REVIEW_TAG = 'Human Review';
 const OTHER_TAG = 'Other';
+const CLIENT_REJECTED_TAG = 'Client_Rejected';
 const DUAL_SOURCE_TAG = 'Dual Source';
 const REFERRAL_SOURCE_TAG = 'Referral / Word of Mouth';
 const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG, DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG])];
@@ -589,6 +591,11 @@ function enforceQualificationGuardrails(classification, call, sameNumberOtherCal
     return classification;
   }
 
+  const clientRejected = detectClientRejectedByAgent(call);
+  if (clientRejected) {
+    return normalizeClassification(clientRejected);
+  }
+
   const noInjuryDisqualification = detectNoBodilyInjuryDisqualification(call);
   if (noInjuryDisqualification) {
     return normalizeClassification(noInjuryDisqualification);
@@ -685,6 +692,39 @@ function detectNoBodilyInjuryDisqualification(call) {
   };
 }
 
+function detectClientRejectedByAgent(call) {
+  const transcript = String(call?.transcription ?? '').trim();
+  if (!transcript) return null;
+  const agentText = extractParticipantUtterances(transcript, ['Agent'])
+    .replace(/\s+/g, ' ')
+    .trim();
+  const text = (agentText || transcript.replace(/\s+/g, ' ').trim()).toLowerCase();
+  if (!text) return null;
+
+  const patterns = [
+    /\bnot\s+something\s+we\s+would\s+be\s+able\s+to\s+help(?:\s+out)?\s+with\b/i,
+    /\b(we|i)\s+(won't|will\s+not|wouldn't|would\s+not|can't|cannot|can\s+not)\s+be\s+able\s+to\s+help\b/i,
+    /\bsorry\s+that\s+we\s+(won't|will\s+not|can't|cannot|can\s+not)\s+be\s+able\s+to\s+help\b/i,
+    /\b(we|i)\s+(do\s+not|don't)\s+think\s+we\s+would\s+be\s+able\s+to\s+(represent|take|handle|help)\b/i,
+    /\b(we|i)\s+(won't|will\s+not|wouldn't|would\s+not|can't|cannot|can\s+not)\s+(represent|take|handle)\b/i,
+    /\bnot\s+a\s+case\s+we\s+(would\s+be\s+able\s+to\s+take|can\s+take|handle)\b/i,
+    /\bwe\s+represent\s+the\s+not\s+at\s+fault\s+part(?:y|ies)\b[\s\S]{0,220}\b(refer|avvo|defense|deny|liability|challenging)\b/i,
+    /\brefer\s+you\s+to\s+(a\s+)?website\b[\s\S]{0,160}\b(avvo|appropriate representation|attorney|defense)\b/i,
+  ];
+
+  if (!patterns.some((re) => re.test(text))) return null;
+
+  return {
+    decision: 'tag_only',
+    tag: CLIENT_REJECTED_TAG,
+    lead_status: null,
+    confidence: 0.99,
+    summary_note:
+      'The intake agent told the caller BLF could not help or represent the matter after reviewing the facts. Tagged as Client_Rejected.',
+    source: 'guardrail_agent_client_rejected',
+  };
+}
+
 function hasSelfFaultAdmission(text) {
   const selfFaultPatterns = [
     /\b(my fault|i (was|am) at fault)\b/i,
@@ -715,6 +755,7 @@ function getAggressiveQualificationOverride(call, sameNumberOtherCalls) {
 
   const text = getCallerNarrativeText(call);
   if (!text) return null;
+  if (detectClientRejectedByAgent(call)) return null;
   if (detectNoBodilyInjuryDisqualification(call)) return null;
   if (!hasFirstPartyMvaNarrative(text)) return null;
   if (hasSelfFaultAdmission(text)) return null;
@@ -1176,12 +1217,14 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
     '- SPAM: robocall/solicitation/scam.',
     '- Human Review: possible MVA intake but not enough clarity to decide qualification automatically (especially unclear fault/coverage).',
     '- Unrelated Case: legal matter outside MVA personal injury scope.',
+    `- ${CLIENT_REJECTED_TAG}: intake agent says BLF cannot help, cannot represent, cannot take the case, or refers the caller elsewhere after reviewing the facts.`,
     '- Other: non-MVA or miscellaneous non-intake items that do not fit any specific tag.',
     '',
     'Decision rules:',
     '- Use decision=qualified when caller narrative indicates an MVA and caller does not clearly admit they caused the crash.',
     '- Do NOT require police report, insurance details, or coverage confirmation to mark qualified.',
-    '- If the caller was not injured, only vehicle/property damage is described, or the agent says BLF cannot take the case because there is no bodily injury, use Unrelated Case and never qualified.',
+    `- If the agent says BLF cannot help, cannot represent, cannot take the case, or refers the caller elsewhere after reviewing the facts, use ${CLIENT_REJECTED_TAG} and never qualified.`,
+    '- If the caller was not injured or only vehicle/property damage is described and no explicit agent rejection is present, use Unrelated Case and never qualified.',
     '- For non-MVA or non-intake calls, use decision=tag_only and choose one tag.',
     '- Never use lead-status concepts in output. This workflow only marks qualified calls.',
     '- If caller appears to be existing client / callback / case update / follow-up, ALWAYS use Existing Client/Duplicate (never qualified).',
@@ -1520,6 +1563,7 @@ async function processSingleCall(config, call) {
   const heuristicClassification = detectCallerDisconnectedHeuristic(analysisCall);
   let classification;
   const existingClientHeuristic = detectExistingClientDuplicateHeuristic(analysisCall, priorSameNumberCalls);
+  const clientRejected = detectClientRejectedByAgent(analysisCall);
   const noInjuryDisqualification = detectNoBodilyInjuryDisqualification(analysisCall);
   const callForClassification = config.force ? { ...analysisCall, tags: [], note: null } : analysisCall;
   if (heuristicClassification) {
@@ -1528,6 +1572,9 @@ async function processSingleCall(config, call) {
   } else if (existingClientHeuristic) {
     console.log(`Heuristic classification matched for ${call.id}: ${existingClientHeuristic.source}`);
     classification = normalizeClassification(existingClientHeuristic);
+  } else if (clientRejected) {
+    console.log(`Heuristic classification matched for ${call.id}: ${clientRejected.source}`);
+    classification = normalizeClassification(clientRejected);
   } else if (noInjuryDisqualification) {
     console.log(`Heuristic classification matched for ${call.id}: ${noInjuryDisqualification.source}`);
     classification = normalizeClassification(noInjuryDisqualification);
