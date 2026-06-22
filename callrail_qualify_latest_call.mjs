@@ -20,7 +20,8 @@ const DUPLICATE_TAG = 'Existing Client/Duplicate';
 const QUALIFIED_TAG = 'Qualified';
 const HUMAN_REVIEW_TAG = 'Human Review';
 const OTHER_TAG = 'Other';
-const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG])];
+const DUAL_SOURCE_TAG = 'Dual Source';
+const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG, DUAL_SOURCE_TAG])];
 
 const CALL_FIELDS = [
   'transcription',
@@ -39,6 +40,41 @@ const CALL_FIELDS = [
   'direction',
   'tracking_phone_number',
   'business_phone_number',
+];
+
+const DUAL_SOURCE_EVIDENCE_PATTERNS = [
+  /where\s+did\s+you\s+hear\s+about\s+us/gi,
+  /how\s+did\s+you\s+hear\s+about\s+us/gi,
+  /how\s+did\s+you\s+find\s+us/gi,
+  /where\s+did\s+you\s+find\s+us/gi,
+  /how\s+did\s+you\s+find\s+out\s+about\s+us/gi,
+  /who\s+referred\s+you/gi,
+  /did\s+someone\s+refer\s+you/gi,
+  /\breferred\b|\brefer\b|\breferral\b|\brecommended\b|\btold\s+me\b|\bsent\s+me\b/gi,
+  /friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|attorney|lawyer|doctor|chiropractor|chiro|clinic|provider|therapist|previous client|former client|past client|word of mouth|google|online|website|social|facebook|instagram|tiktok|amig[oa]|quiropr[aá]ctico|abogado/gi,
+];
+
+const DIGITAL_PASS_ALONG_PATTERNS = [
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,120}\b(googled|google|searched|looked\s+(?:you|us|brumley)?\s*up|found\s+(?:you|us|brumley).{0,40}\bonline|found\s+(?:you|us|brumley).{0,40}\bgoogle|saw\s+(?:you|us|brumley).{0,40}\b(?:facebook|instagram|tiktok|social))\b/i,
+  /\b(googled|google|searched|online|website|facebook|instagram|tiktok|social)\b.{0,140}\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,140}\b(told|sent|shared|recommended|suggested)\b/i,
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,100}\b(told|said|suggested)\b.{0,140}\b(look\s+up|google|search|find)\s+(?:a|an|some)?\s*(lawyer|attorney|firm)\b/i,
+  /\b(reposted|shared)\b.{0,80}\b(instagram|facebook|tiktok|social|post)\b/i,
+];
+
+const NON_DIGITAL_REFERRAL_PATTERNS = [
+  /\bi\s+was\s+referred\b/i,
+  /\breferred\s+(?:to\s+(?:you|us|brumley)\s+)?by\b/i,
+  /\breferral\s+from\b/i,
+  /\brecommended\s+by\b/i,
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|parent|mom|mother|dad|father|brother|sister|wife|husband)\b.{0,120}\b(referred|recommended|told|sent|gave|passed)\b.{0,140}\b(you|us|brumley|law firm|firm|your number|your name|call)\b/i,
+  /\b(?:my|a|our)\s+(chiropractor|chiro|doctor|attorney|lawyer|clinic|provider|therapist)\b.{0,140}\b(referred|recommended|gave|sent|told|passed)\b/i,
+  /\b(chiropractor|chiro|doctor|attorney|lawyer|clinic|provider|therapist)\b.{0,140}\b(referred|recommended|gave|sent|told|passed)\b.{0,140}\b(you|us|brumley|law firm|firm|your number|your name)\b/i,
+  /\b(previous|former|past|current|existing)\s+client\b.{0,140}\b(referred|recommended|told|gave|sent|passed)\b/i,
+  /\bword\s+of\s+mouth\b/i,
+  /\bsaw\s+(?:a|your|the)\s+(poster|billboard|sign)\b/i,
+  /\b(?:un|una|mi)\s+amig[oa]\b.{0,140}\b(recomend[oó]|refiri[oó]|dio|dieron|pas[oó]|coment[oó])\b/i,
+  /\bme\s+(recomend[oó]|refiri[oó]|dieron|dio|pasaron|pas[oó])\b.{0,140}\b(n[uú]mero|brumley|firma|abogado|ustedes)\b/i,
+  /\b(quiropr[aá]ctico|doctor|cl[ií]nica|abogado)\b.{0,140}\b(recomend[oó]|refiri[oó]|dio|dieron|pas[oó])\b/i,
 ];
 
 function printUsage() {
@@ -223,6 +259,82 @@ function toJsonSafe(text) {
   } catch {
     return null;
   }
+}
+
+function getDualSourceDetectionText(call) {
+  return [call?.transcription, call?.note]
+    .map((x) => String(x ?? '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getDualSourceEvidenceWindows(text) {
+  const haystack = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!haystack) return [];
+
+  const windows = [];
+  for (const pattern of DUAL_SOURCE_EVIDENCE_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(haystack)) && windows.length < 20) {
+      windows.push(haystack.slice(Math.max(0, match.index - 650), Math.min(haystack.length, match.index + 1300)));
+    }
+  }
+
+  const deduped = [];
+  for (const windowText of windows) {
+    const key = windowText.slice(180, 420);
+    if (!deduped.some((existing) => existing.includes(key) || windowText.includes(existing.slice(180, 420)))) {
+      deduped.push(windowText);
+    }
+  }
+  return deduped.length ? deduped : [haystack.slice(0, 2000)];
+}
+
+function isDigitalPassAlongSource(text) {
+  const haystack = String(text || '');
+  return DIGITAL_PASS_ALONG_PATTERNS.some((re) => re.test(haystack));
+}
+
+function isNonDigitalReferralSource(text) {
+  const haystack = String(text || '');
+  return NON_DIGITAL_REFERRAL_PATTERNS.some((re) => re.test(haystack));
+}
+
+function hasDualSourceReferralSignal(text) {
+  const windows = getDualSourceEvidenceWindows(text);
+  return windows.some((windowText) => !isDigitalPassAlongSource(windowText) && isNonDigitalReferralSource(windowText));
+}
+
+function applyDualSourceSecondaryTag(call, payload, options = {}) {
+  const textForDetection = options.textForDetection ?? getDualSourceDetectionText(call);
+  if (!hasDualSourceReferralSignal(textForDetection)) {
+    return { payload, added: false };
+  }
+
+  const existingTags = getTagNames(call);
+  if (existingTags.includes(DUAL_SOURCE_TAG)) {
+    return { payload, added: false };
+  }
+
+  const next = { ...payload };
+  const payloadTags = Array.isArray(next.tags) ? next.tags.filter(Boolean) : [];
+
+  if (payloadTags.length > 0) {
+    next.tags = [...new Set([...payloadTags, DUAL_SOURCE_TAG])];
+    if (typeof next.append_tags !== 'boolean') {
+      next.append_tags = true;
+    }
+  } else if (next.append_tags === false) {
+    next.tags = [...new Set([...existingTags, DUAL_SOURCE_TAG])];
+  } else {
+    next.tags = [DUAL_SOURCE_TAG];
+    next.append_tags = true;
+  }
+
+  return { payload: next, added: true };
 }
 
 function ensureOneOrTwoSentences(text) {
@@ -437,6 +549,59 @@ function hasPotentialMvaContext(call) {
   return mvaPatterns.some((re) => re.test(transcript));
 }
 
+function getCallerNarrativeText(call) {
+  const transcript = String(call?.transcription ?? '').trim();
+  if (!transcript) return '';
+  const callerText = extractParticipantUtterances(transcript, ['Caller', 'Customer', 'Client'])
+    .replace(/\s+/g, ' ')
+    .trim();
+  return callerText || transcript.replace(/\s+/g, ' ').trim();
+}
+
+function hasSelfFaultAdmission(text) {
+  const selfFaultPatterns = [
+    /\b(my fault|i (was|am) at fault)\b/i,
+    /\bi (rear[- ]?ended|hit|struck|sideswiped|t[- ]?boned)\s+(them|him|her|another (car|vehicle)|the other (car|vehicle)|someone)\b/i,
+    /\bi (ran|blew)\s+(a )?(red light|stop sign)\b/i,
+    /\bi (was )?speeding\b/i,
+    /\bi (caused|causing)\s+(the )?(accident|crash|collision)\b/i,
+  ];
+  return selfFaultPatterns.some((re) => re.test(text));
+}
+
+function hasFirstPartyMvaNarrative(text) {
+  const narrativePatterns = [
+    /\bi was (hit|rear[- ]?ended|sideswiped|t[- ]?boned|in an accident|in a crash)\b/i,
+    /\bsomeone (hit|rear[- ]?ended|sideswiped|t[- ]?boned) (me|my (car|vehicle))\b/i,
+    /\b(my|our)\s+(car|vehicle|truck|motorcycle)\b[\s\S]{0,60}\b(hit|rear[- ]?ended|sideswiped|t[- ]?boned|crash|accident|collision)\b/i,
+    /\b(accident|crash|collision)\b[\s\S]{0,80}\b(my|our|me|we)\b/i,
+  ];
+  return narrativePatterns.some((re) => re.test(text));
+}
+
+function getAggressiveQualificationOverride(call, sameNumberOtherCalls) {
+  const transcript = String(call?.transcription ?? '').trim();
+  if (!transcript) return null;
+
+  const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls);
+  if (existingClientHeuristic) return null;
+
+  const text = getCallerNarrativeText(call);
+  if (!text) return null;
+  if (!hasFirstPartyMvaNarrative(text)) return null;
+  if (hasSelfFaultAdmission(text)) return null;
+
+  return normalizeClassification({
+    decision: 'qualified',
+    tag: null,
+    lead_status: 'good_lead',
+    confidence: 0.9,
+    summary_note:
+      'Caller narrative indicates a motor vehicle accident where the caller does not clearly admit fault, so this was auto-qualified.',
+    source: 'guardrail_assume_qualified_unless_self_fault',
+  });
+}
+
 function enforceHumanReviewGuardrails(classification, call) {
   if (classification.decision === 'qualified') return classification;
 
@@ -452,6 +617,40 @@ function enforceHumanReviewGuardrails(classification, call) {
   }
 
   return classification;
+}
+
+function getEffectiveCallDurationSeconds(call) {
+  const callDuration = Number(call?.duration ?? 0);
+  if (Number.isFinite(callDuration) && callDuration > 0) return callDuration;
+  const recordingDuration = Number(call?.recording_duration ?? 0);
+  if (Number.isFinite(recordingDuration) && recordingDuration > 0) return recordingDuration;
+  return 0;
+}
+
+function enforceMissingTranscriptGuardrails(classification, call) {
+  const transcript = String(call?.transcription ?? '').trim();
+  if (transcript) return classification;
+
+  const durationSeconds = getEffectiveCallDurationSeconds(call);
+  if (durationSeconds < 45) return classification;
+
+  const riskyAutoTag =
+    classification.decision === 'tag_only' &&
+    (classification.tag === 'Caller Disconnected' || classification.tag === 'SPAM' || classification.tag === OTHER_TAG);
+
+  if (!riskyAutoTag) return classification;
+
+  return {
+    ...classification,
+    decision: 'tag_only',
+    tag: HUMAN_REVIEW_TAG,
+    lead_status: null,
+    confidence: Math.min(Number.isFinite(classification.confidence) ? classification.confidence : 0.85, 0.85),
+    summary_note: ensureOneOrTwoSentences(
+      `Call lasted about ${Math.round(durationSeconds)} seconds but no transcript was available, so this was routed to Human Review instead of auto-tagging as disconnected.`
+    ),
+    source: 'guardrail_missing_transcript_long_call',
+  };
 }
 
 function canUseDuplicateTag(call, priorSameNumberCalls, existingClientHeuristic) {
@@ -674,9 +873,9 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
     '- Other: non-MVA or miscellaneous non-intake items that do not fit any specific tag.',
     '',
     'Decision rules:',
-    '- Use decision=qualified ONLY when this call is a valid MVA case and injured party appears not at fault.',
-    '- For anything else, use decision=tag_only and choose one tag.',
-    '- If the call looks like a possible MVA but fault is unclear, choose Human Review (not Other).',
+    '- Use decision=qualified when caller narrative indicates an MVA and caller does not clearly admit they caused the crash.',
+    '- Do NOT require police report, insurance details, or coverage confirmation to mark qualified.',
+    '- For non-MVA or non-intake calls, use decision=tag_only and choose one tag.',
     '- Never use lead-status concepts in output. This workflow only marks qualified calls.',
     '- If caller appears to be existing client / callback / case update / follow-up, ALWAYS use Existing Client/Duplicate (never qualified).',
     '- If there is already an older same-number call with good_lead, default to Existing Client/Duplicate unless clear evidence this is a new unrelated intake.',
@@ -747,7 +946,7 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
     },
     body: JSON.stringify({
       model: config.model,
-      temperature: 0.1,
+      ...(!/^gpt-5(?:$|-)/i.test(String(config.model || '').trim()) ? { temperature: 0.1 } : {}),
       response_format: {
         type: 'json_schema',
         json_schema: schema,
@@ -988,6 +1187,11 @@ async function processSingleCall(config, call) {
     classification = normalizeClassification(rawClassification);
     classification = enforceQualificationGuardrails(classification, call, priorSameNumberCalls);
     classification = enforceHumanReviewGuardrails(classification, call);
+    classification = enforceMissingTranscriptGuardrails(classification, call);
+    const aggressiveQualification = getAggressiveQualificationOverride(call, priorSameNumberCalls);
+    if (aggressiveQualification) {
+      classification = aggressiveQualification;
+    }
 
     const duplicateAllowed = canUseDuplicateTag(call, priorSameNumberCalls, existingClientHeuristic);
     if (classification.decision === 'tag_only' && classification.tag === DUPLICATE_TAG && !duplicateAllowed) {
@@ -998,6 +1202,11 @@ async function processSingleCall(config, call) {
       classification = normalizeClassification(retryRaw);
       classification = enforceQualificationGuardrails(classification, call, priorSameNumberCalls);
       classification = enforceHumanReviewGuardrails(classification, call);
+      classification = enforceMissingTranscriptGuardrails(classification, call);
+      const aggressiveQualification = getAggressiveQualificationOverride(call, priorSameNumberCalls);
+      if (aggressiveQualification) {
+        classification = aggressiveQualification;
+      }
       if (classification.source === 'openai') {
         classification.source = 'openai_no_duplicate_retry';
       }
@@ -1011,7 +1220,15 @@ async function processSingleCall(config, call) {
       classification = normalizeClassification(lateExistingClientCheck);
     }
   }
-  const payload = buildUpdatePayload(call, classification);
+  const basePayload = buildUpdatePayload(call, classification);
+  const dualSourceResult =
+    classification.decision === 'qualified'
+      ? applyDualSourceSecondaryTag(call, basePayload)
+      : { payload: basePayload, added: false };
+  const payload = dualSourceResult.payload;
+  if (dualSourceResult.added) {
+    console.log(`Non-digital referral source detected for ${call.id}; adding secondary tag "${DUAL_SOURCE_TAG}".`);
+  }
 
   const duplicateBackfillCandidates =
     classification.decision === 'qualified'
@@ -1025,6 +1242,9 @@ async function processSingleCall(config, call) {
   }));
 
   const preview = formatDecisionPreview(call, classification, payload);
+  if (dualSourceResult.added) {
+    preview.dual_source_tag_added = true;
+  }
   if (duplicateBackfillPlan.length > 0) {
     preview.duplicate_backfill_updates = duplicateBackfillPlan;
   }

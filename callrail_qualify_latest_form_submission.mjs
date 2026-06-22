@@ -20,7 +20,8 @@ const DUPLICATE_TAG = 'Existing Client/Duplicate';
 const QUALIFIED_TAG = 'Qualified';
 const HUMAN_REVIEW_TAG = 'Human Review';
 const OTHER_TAG = 'Other';
-const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG])];
+const DUAL_SOURCE_TAG = 'Dual Source';
+const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG, DUAL_SOURCE_TAG])];
 
 const FORM_FIELDS = [
   'lead_status',
@@ -41,6 +42,41 @@ const FORM_FIELDS = [
   'customer_phone_number',
   'customer_name',
   'customer_email',
+];
+
+const DUAL_SOURCE_EVIDENCE_PATTERNS = [
+  /where\s+did\s+you\s+hear\s+about\s+us/gi,
+  /how\s+did\s+you\s+hear\s+about\s+us/gi,
+  /how\s+did\s+you\s+find\s+us/gi,
+  /where\s+did\s+you\s+find\s+us/gi,
+  /how\s+did\s+you\s+find\s+out\s+about\s+us/gi,
+  /who\s+referred\s+you/gi,
+  /did\s+someone\s+refer\s+you/gi,
+  /\breferred\b|\brefer\b|\breferral\b|\brecommended\b|\btold\s+me\b|\bsent\s+me\b/gi,
+  /friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|attorney|lawyer|doctor|chiropractor|chiro|clinic|provider|therapist|previous client|former client|past client|word of mouth|google|online|website|social|facebook|instagram|tiktok|amig[oa]|quiropr[aá]ctico|abogado/gi,
+];
+
+const DIGITAL_PASS_ALONG_PATTERNS = [
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,120}\b(googled|google|searched|looked\s+(?:you|us|brumley)?\s*up|found\s+(?:you|us|brumley).{0,40}\bonline|found\s+(?:you|us|brumley).{0,40}\bgoogle|saw\s+(?:you|us|brumley).{0,40}\b(?:facebook|instagram|tiktok|social))\b/i,
+  /\b(googled|google|searched|online|website|facebook|instagram|tiktok|social)\b.{0,140}\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,140}\b(told|sent|shared|recommended|suggested)\b/i,
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|mom|mother|dad|father|brother|sister|wife|husband|fianc[eé]e?)\b.{0,100}\b(told|said|suggested)\b.{0,140}\b(look\s+up|google|search|find)\s+(?:a|an|some)?\s*(lawyer|attorney|firm)\b/i,
+  /\b(reposted|shared)\b.{0,80}\b(instagram|facebook|tiktok|social|post)\b/i,
+];
+
+const NON_DIGITAL_REFERRAL_PATTERNS = [
+  /\bi\s+was\s+referred\b/i,
+  /\breferred\s+(?:to\s+(?:you|us|brumley)\s+)?by\b/i,
+  /\breferral\s+from\b/i,
+  /\brecommended\s+by\b/i,
+  /\b(friend|coworker|co-worker|co worker|employee|employer|boss|supervisor|family|relative|parent|mom|mother|dad|father|brother|sister|wife|husband)\b.{0,120}\b(referred|recommended|told|sent|gave|passed)\b.{0,140}\b(you|us|brumley|law firm|firm|your number|your name|call)\b/i,
+  /\b(?:my|a|our)\s+(chiropractor|chiro|doctor|attorney|lawyer|clinic|provider|therapist)\b.{0,140}\b(referred|recommended|gave|sent|told|passed)\b/i,
+  /\b(chiropractor|chiro|doctor|attorney|lawyer|clinic|provider|therapist)\b.{0,140}\b(referred|recommended|gave|sent|told|passed)\b.{0,140}\b(you|us|brumley|law firm|firm|your number|your name)\b/i,
+  /\b(previous|former|past|current|existing)\s+client\b.{0,140}\b(referred|recommended|told|gave|sent|passed)\b/i,
+  /\bword\s+of\s+mouth\b/i,
+  /\bsaw\s+(?:a|your|the)\s+(poster|billboard|sign)\b/i,
+  /\b(?:un|una|mi)\s+amig[oa]\b.{0,140}\b(recomend[oó]|refiri[oó]|dio|dieron|pas[oó]|coment[oó])\b/i,
+  /\bme\s+(recomend[oó]|refiri[oó]|dieron|dio|pasaron|pas[oó])\b.{0,140}\b(n[uú]mero|brumley|firma|abogado|ustedes)\b/i,
+  /\b(quiropr[aá]ctico|doctor|cl[ií]nica|abogado)\b.{0,140}\b(recomend[oó]|refiri[oó]|dio|dieron|pas[oó])\b/i,
 ];
 
 function printUsage() {
@@ -306,6 +342,82 @@ function getFormTextForClassification(call) {
     chunks.push(val);
   }
   return chunks.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function getDualSourceDetectionText(call) {
+  return [getFormTextForClassification(call), call?.note]
+    .map((x) => String(x ?? '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getDualSourceEvidenceWindows(text) {
+  const haystack = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!haystack) return [];
+
+  const windows = [];
+  for (const pattern of DUAL_SOURCE_EVIDENCE_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(haystack)) && windows.length < 20) {
+      windows.push(haystack.slice(Math.max(0, match.index - 650), Math.min(haystack.length, match.index + 1300)));
+    }
+  }
+
+  const deduped = [];
+  for (const windowText of windows) {
+    const key = windowText.slice(180, 420);
+    if (!deduped.some((existing) => existing.includes(key) || windowText.includes(existing.slice(180, 420)))) {
+      deduped.push(windowText);
+    }
+  }
+  return deduped.length ? deduped : [haystack.slice(0, 2000)];
+}
+
+function isDigitalPassAlongSource(text) {
+  const haystack = String(text || '');
+  return DIGITAL_PASS_ALONG_PATTERNS.some((re) => re.test(haystack));
+}
+
+function isNonDigitalReferralSource(text) {
+  const haystack = String(text || '');
+  return NON_DIGITAL_REFERRAL_PATTERNS.some((re) => re.test(haystack));
+}
+
+function hasDualSourceReferralSignal(text) {
+  const windows = getDualSourceEvidenceWindows(text);
+  return windows.some((windowText) => !isDigitalPassAlongSource(windowText) && isNonDigitalReferralSource(windowText));
+}
+
+function applyDualSourceSecondaryTag(call, payload, options = {}) {
+  const textForDetection = options.textForDetection ?? getDualSourceDetectionText(call);
+  if (!hasDualSourceReferralSignal(textForDetection)) {
+    return { payload, added: false };
+  }
+
+  const existingTags = getTagNames(call);
+  if (existingTags.includes(DUAL_SOURCE_TAG)) {
+    return { payload, added: false };
+  }
+
+  const next = { ...payload };
+  const payloadTags = Array.isArray(next.tags) ? next.tags.filter(Boolean) : [];
+
+  if (payloadTags.length > 0) {
+    next.tags = [...new Set([...payloadTags, DUAL_SOURCE_TAG])];
+    if (typeof next.append_tags !== 'boolean') {
+      next.append_tags = true;
+    }
+  } else if (next.append_tags === false) {
+    next.tags = [...new Set([...existingTags, DUAL_SOURCE_TAG])];
+  } else {
+    next.tags = [DUAL_SOURCE_TAG];
+    next.append_tags = true;
+  }
+
+  return { payload: next, added: true };
 }
 
 function detectCallerDisconnectedHeuristic(call) {
@@ -801,7 +913,7 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
     },
     body: JSON.stringify({
       model: config.model,
-      temperature: 0.1,
+      ...(!/^gpt-5(?:$|-)/i.test(String(config.model || '').trim()) ? { temperature: 0.1 } : {}),
       response_format: {
         type: 'json_schema',
         json_schema: schema,
@@ -1074,9 +1186,17 @@ async function processSingleCall(config, call) {
       classification = normalizeClassification(lateExistingClientCheck);
     }
   }
-  const payload = buildUpdatePayload(call, classification, {
+  const basePayload = buildUpdatePayload(call, classification, {
     forceReplaceTag: config.force && classification.decision === 'tag_only',
   });
+  const dualSourceResult =
+    classification.decision === 'qualified'
+      ? applyDualSourceSecondaryTag(call, basePayload)
+      : { payload: basePayload, added: false };
+  const payload = dualSourceResult.payload;
+  if (dualSourceResult.added) {
+    console.log(`Non-digital referral source detected for ${call.id}; adding secondary tag "${DUAL_SOURCE_TAG}".`);
+  }
 
   const duplicateBackfillCandidates =
     classification.decision === 'qualified'
@@ -1090,6 +1210,9 @@ async function processSingleCall(config, call) {
   }));
 
   const preview = formatDecisionPreview(call, classification, payload);
+  if (dualSourceResult.added) {
+    preview.dual_source_tag_added = true;
+  }
   if (duplicateBackfillPlan.length > 0) {
     preview.duplicate_backfill_updates = duplicateBackfillPlan;
   }

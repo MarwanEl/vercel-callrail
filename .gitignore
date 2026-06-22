@@ -1,2 +1,8 @@
 .vercel
 .DS_Store
+node_modules/
+.playwright/
+.env*
+callrail_backfill_dryrun*.log
+callrail_backfill_dryrun*.csv
+callrail_backfill_mar01_apr09_2026.mjs
