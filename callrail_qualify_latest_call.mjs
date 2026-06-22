@@ -1228,7 +1228,37 @@ function normalizeClassification(raw) {
 
   result.summary_note = appendSourceSummaryToNote(result.summary_note, result.source_summary);
 
-  return result;
+  return enforceReferralSourceNotQualified(result);
+}
+
+function enforceReferralSourceNotQualified(classification) {
+  if (classification?.decision !== 'qualified') {
+    return classification;
+  }
+
+  const sourceText = [classification.source_summary, classification.summary_note]
+    .filter(Boolean)
+    .join(' ');
+  const hasReferralSource =
+    classification.source_tag === REFERRAL_SOURCE_TAG ||
+    (isNonDigitalReferralSource(sourceText) && !isDigitalPassAlongSource(sourceText));
+  if (!hasReferralSource) {
+    return classification;
+  }
+
+  const note = String(classification.summary_note || '').trim();
+  const referralNote = 'Lead source is referral/word of mouth, so this was not marked Qualified.';
+  const summaryNote = note.includes(referralNote) ? note : (note + ' ' + referralNote).trim();
+
+  return {
+    ...classification,
+    decision: 'tag_only',
+    tag: REFERRAL_SOURCE_TAG,
+    lead_status: null,
+    source_tag: null,
+    summary_note: summaryNote,
+    source: 'guardrail_referral_source_not_qualified',
+  };
 }
 
 function buildUpdatePayload(call, classification, options = {}) {
@@ -1456,6 +1486,8 @@ async function processSingleCall(config, call) {
       classification = normalizeClassification(lateExistingClientCheck);
     }
   }
+  classification = enforceReferralSourceNotQualified(classification);
+
   const basePayload = buildUpdatePayload(call, classification, {
     forceReplaceTag: config.force && classification.decision === 'tag_only',
   });
