@@ -755,8 +755,13 @@ function hasSelfFaultAdmission(text) {
 }
 
 function hasFirstPartyMvaNarrative(text) {
+  const vehicleContext = /\b(car|vehicle|truck|motorcycle|semi|bus|driver|passenger|rear[- ]?end|sideswipe|t[- ]?bone|collision|crash|freeway|road|lane|intersection|stop sign|traffic|insurance|police report)\b/i;
+  if (!vehicleContext.test(text)) return false;
+
   const narrativePatterns = [
-    /\bi was (hit|rear[- ]?ended|sideswiped|t[- ]?boned|in an accident|in a crash)\b/i,
+    /\bi was (rear[- ]?ended|sideswiped|t[- ]?boned|in an accident|in a crash)\b/i,
+    /\bi was hit\b[\s\S]{0,80}\b(by|with)\b[\s\S]{0,80}\b(car|vehicle|truck|motorcycle|bus|driver)\b/i,
+    /\bi got hit\b[\s\S]{0,80}\b(by|with)\b[\s\S]{0,80}\b(car|vehicle|truck|motorcycle|bus|driver)\b/i,
     /\bsomeone (hit|rear[- ]?ended|sideswiped|t[- ]?boned) (me|my (car|vehicle))\b/i,
     /\b(my|our)\s+(car|vehicle|truck|motorcycle)\b[\s\S]{0,60}\b(hit|rear[- ]?ended|sideswiped|t[- ]?boned|crash|accident|collision)\b/i,
     /\b(accident|crash|collision)\b[\s\S]{0,80}\b(my|our|me|we)\b/i,
