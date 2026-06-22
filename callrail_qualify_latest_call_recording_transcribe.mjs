@@ -22,7 +22,8 @@ const QUALIFIED_TAG = 'Qualified';
 const HUMAN_REVIEW_TAG = 'Human Review';
 const OTHER_TAG = 'Other';
 const DUAL_SOURCE_TAG = 'Dual Source';
-const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG, DUAL_SOURCE_TAG])];
+const REFERRAL_SOURCE_TAG = 'Referral / Word of Mouth';
+const WORKFLOW_TAGS = [...new Set([...TAGS, QUALIFIED_TAG, DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG])];
 
 const CALL_FIELDS = [
   'transcription',
@@ -322,38 +323,55 @@ function isNonDigitalReferralSource(text) {
   return NON_DIGITAL_REFERRAL_PATTERNS.some((re) => re.test(haystack));
 }
 
-function hasDualSourceReferralSignal(text) {
-  const windows = getDualSourceEvidenceWindows(text);
-  return windows.some((windowText) => !isDigitalPassAlongSource(windowText) && isNonDigitalReferralSource(windowText));
+function isDigitalSourceMention(text) {
+  return /\b(google|googled|search(?:ed)?|online|website|web\s+search|facebook|instagram|tiktok|social|ad|ads|lsa|maps|google\s+my\s+business)\b/i.test(String(text || ''));
 }
 
-function applyDualSourceSecondaryTag(call, payload, options = {}) {
+function getSecondarySourceTag(text) {
+  const windows = getDualSourceEvidenceWindows(text);
+  for (const windowText of windows) {
+    if (isNonDigitalReferralSource(windowText) && (isDigitalPassAlongSource(windowText) || isDigitalSourceMention(windowText))) {
+      return DUAL_SOURCE_TAG;
+    }
+  }
+  if (windows.some((windowText) => isNonDigitalReferralSource(windowText))) {
+    return REFERRAL_SOURCE_TAG;
+  }
+  return null;
+}
+
+function applySourceSecondaryTag(call, payload, options = {}) {
   const textForDetection = options.textForDetection ?? getDualSourceDetectionText(call);
-  if (!hasDualSourceReferralSignal(textForDetection)) {
+  const requestedSourceTag = [DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG].includes(options.sourceTag) ? options.sourceTag : null;
+  const sourceTag = requestedSourceTag ?? getSecondarySourceTag(textForDetection);
+  if (!sourceTag) {
     return { payload, added: false };
   }
 
-  const existingTags = getTagNames(call);
-  if (existingTags.includes(DUAL_SOURCE_TAG)) {
+  const sourceTags = new Set([DUAL_SOURCE_TAG, REFERRAL_SOURCE_TAG]);
+  const otherSourceTags = new Set([...sourceTags].filter((tag) => tag !== sourceTag));
+  const existingTags = getTagNames(call).filter((tag) => !otherSourceTags.has(tag));
+  const currentAlreadyCorrect = existingTags.includes(sourceTag) && getTagNames(call).every((tag) => !otherSourceTags.has(tag));
+  if (currentAlreadyCorrect) {
     return { payload, added: false };
   }
 
   const next = { ...payload };
-  const payloadTags = Array.isArray(next.tags) ? next.tags.filter(Boolean) : [];
+  const payloadTags = Array.isArray(next.tags) ? next.tags.filter(Boolean).filter((tag) => !otherSourceTags.has(tag)) : [];
 
   if (payloadTags.length > 0) {
-    next.tags = [...new Set([...payloadTags, DUAL_SOURCE_TAG])];
+    next.tags = [...new Set([...payloadTags, sourceTag])];
     if (typeof next.append_tags !== 'boolean') {
       next.append_tags = true;
     }
   } else if (next.append_tags === false) {
-    next.tags = [...new Set([...existingTags, DUAL_SOURCE_TAG])];
+    next.tags = [...new Set([...existingTags, sourceTag])];
   } else {
-    next.tags = [DUAL_SOURCE_TAG];
+    next.tags = [sourceTag];
     next.append_tags = true;
   }
 
-  return { payload: next, added: true };
+  return { payload: next, added: true, tag: sourceTag };
 }
 
 function ensureOneOrTwoSentences(text) {
@@ -1051,6 +1069,11 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
       ? '- IMPORTANT: For this classification pass, do NOT use Existing Client/Duplicate.'
       : '',
     '',
+    'Source attribution rules for source_tag (only use for decision=qualified; otherwise null):',
+    `- ${REFERRAL_SOURCE_TAG}: caller clearly says Brumley was recommended/referred directly by a friend, family member, coworker, employer/employee, attorney/lawyer, chiropractor/doctor/clinic/provider, prior client, or word of mouth. Use this only when that person/source appears to have already known or recommended Brumley directly.`,
+    `- ${DUAL_SOURCE_TAG}: source chain is mixed or unclear, such as both Google/social/web search and word-of-mouth/referral being mentioned, or the caller says they were told by someone but also found/confirmed Brumley online and it is not clear which source was original.`,
+    '- null: no source discussed, existing client/duplicate/non-qualified, or clearly digital-only source. If a friend/family member merely found Brumley on Google/social and passed along the link/name, treat it as digital-only and use null.',
+    '',
     'Return 1-2 sentence summary_note.',
     '',
     'CALL JSON:',
@@ -1101,8 +1124,12 @@ async function classifyCall(config, call, sameNumberCalls, options = {}) {
           minimum: 0,
           maximum: 1,
         },
+        source_tag: {
+          type: ['string', 'null'],
+          enum: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG, null],
+        },
       },
-      required: ['decision', 'tag', 'summary_note', 'confidence'],
+      required: ['decision', 'tag', 'summary_note', 'confidence', 'source_tag'],
     },
   };
 
@@ -1158,6 +1185,7 @@ function normalizeClassification(raw) {
     lead_status: null,
     summary_note: ensureOneOrTwoSentences(raw.summary_note),
     confidence: Number(raw.confidence),
+    source_tag: [REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG].includes(raw.source_tag) ? raw.source_tag : null,
     source: typeof raw.source === 'string' ? raw.source : 'openai',
   };
 
@@ -1168,11 +1196,15 @@ function normalizeClassification(raw) {
   if (result.decision === 'qualified') {
     result.lead_status = 'good_lead';
     result.tag = null;
+    if (![REFERRAL_SOURCE_TAG, DUAL_SOURCE_TAG].includes(result.source_tag)) {
+      result.source_tag = null;
+    }
   } else {
     if (!result.tag || !TAGS.includes(result.tag)) {
       result.tag = HUMAN_REVIEW_TAG;
     }
     result.lead_status = null;
+    result.source_tag = null;
   }
 
   if (!Number.isFinite(result.confidence)) {
@@ -1372,6 +1404,7 @@ async function processSingleCall(config, call) {
     classification = enforceMissingTranscriptGuardrails(classification, analysisCall);
     const aggressiveQualification = getAggressiveQualificationOverride(analysisCall, priorSameNumberCalls);
     if (aggressiveQualification) {
+      aggressiveQualification.source_tag = classification.source_tag;
       classification = aggressiveQualification;
     }
 
@@ -1387,6 +1420,7 @@ async function processSingleCall(config, call) {
       classification = enforceMissingTranscriptGuardrails(classification, analysisCall);
       const aggressiveQualification = getAggressiveQualificationOverride(analysisCall, priorSameNumberCalls);
       if (aggressiveQualification) {
+        aggressiveQualification.source_tag = classification.source_tag;
         classification = aggressiveQualification;
       }
       if (classification.source === 'openai') {
@@ -1405,15 +1439,16 @@ async function processSingleCall(config, call) {
   const basePayload = buildUpdatePayload(call, classification, {
     forceReplaceTag: config.force && classification.decision === 'tag_only',
   });
-  const dualSourceResult =
+  const sourceTagResult =
     classification.decision === 'qualified'
-      ? applyDualSourceSecondaryTag(call, basePayload, {
+      ? applySourceSecondaryTag(call, basePayload, {
+          sourceTag: classification.source_tag,
           textForDetection: getDualSourceDetectionText(analysisCall),
         })
       : { payload: basePayload, added: false };
-  const payload = dualSourceResult.payload;
-  if (dualSourceResult.added) {
-    console.log(`Non-digital referral source detected for ${call.id}; adding secondary tag "${DUAL_SOURCE_TAG}".`);
+  const payload = sourceTagResult.payload;
+  if (sourceTagResult.added) {
+    console.log(`Source attribution detected for ${call.id}; adding secondary tag "${sourceTagResult.tag}".`);
   }
 
   const duplicateBackfillCandidates =
@@ -1428,8 +1463,8 @@ async function processSingleCall(config, call) {
   }));
 
   const preview = formatDecisionPreview(call, classification, payload);
-  if (dualSourceResult.added) {
-    preview.dual_source_tag_added = true;
+  if (sourceTagResult.added) {
+    preview.source_tag_added = sourceTagResult.tag;
   }
   if (analysisCall?._transcription_source) {
     preview.transcription_source = analysisCall._transcription_source;
