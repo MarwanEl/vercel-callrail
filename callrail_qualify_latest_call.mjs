@@ -555,6 +555,11 @@ function enforceQualificationGuardrails(classification, call, sameNumberOtherCal
     return classification;
   }
 
+  const noInjuryDisqualification = detectNoBodilyInjuryDisqualification(call);
+  if (noInjuryDisqualification) {
+    return normalizeClassification(noInjuryDisqualification);
+  }
+
   const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, sameNumberOtherCalls);
   if (existingClientHeuristic) {
     return normalizeClassification({
@@ -596,6 +601,41 @@ function getCallerNarrativeText(call) {
   return callerText || transcript.replace(/\s+/g, ' ').trim();
 }
 
+function detectNoBodilyInjuryDisqualification(call) {
+  const transcript = String(call?.transcription ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!transcript) return null;
+
+  const patterns = [
+    /\b(no|not)\s+(injured|hurt)\b/i,
+    /\b(no|not)\s+(bodily|physical|personal)\s+injur/i,
+    /\b(property|vehicle|car)\s+damage\s+only\b/i,
+    /\bonly\s+(property|vehicle|car)\s+damage\b/i,
+    /\byou\s+weren't\s+in\s+the\s+car\b/i,
+    /\byou\s+were\s+not\s+in\s+the\s+car\b/i,
+    /\bout\s+of\s+the\s+car\b[\s\S]{0,160}\b(hit|struck|damage|van|vehicle|car)\b/i,
+    /\b(hit|struck|damage)\b[\s\S]{0,160}\bout\s+of\s+the\s+car\b/i,
+    /\b(if|because|since)\s+you\s+(weren't|were\s+not)\s+injured\b/i,
+    /\b(if|because|since)\s+there\s+(was|were)\s+no\s+injur/i,
+    /\b(isn't|is\s+not|not)\s+a\s+case\s+we\s+(would\s+)?be\s+able\s+to\s+take\b/i,
+    /\b(we|this firm)\s+(can't|cannot|can\s+not|wouldn't|would\s+not)\s+(take|handle)\s+(this|the)\s+case\b/i,
+    /\bwe\s+(deal|handle)\s+with\b[\s\S]{0,80}\bbodily\s+injur/i,
+  ];
+
+  if (!patterns.some((re) => re.test(transcript))) return null;
+
+  return {
+    decision: 'tag_only',
+    tag: 'Unrelated Case',
+    lead_status: null,
+    confidence: 0.98,
+    summary_note:
+      'Caller described a motor vehicle/property-damage issue without bodily injury, and the agent indicated BLF could not take the case. Tagged as Unrelated Case.',
+    source: 'guardrail_no_bodily_injury_disqualification',
+  };
+}
+
 function hasSelfFaultAdmission(text) {
   const selfFaultPatterns = [
     /\b(my fault|i (was|am) at fault)\b/i,
@@ -626,6 +666,7 @@ function getAggressiveQualificationOverride(call, sameNumberOtherCalls) {
 
   const text = getCallerNarrativeText(call);
   if (!text) return null;
+  if (detectNoBodilyInjuryDisqualification(call)) return null;
   if (!hasFirstPartyMvaNarrative(text)) return null;
   if (hasSelfFaultAdmission(text)) return null;
 
@@ -913,6 +954,7 @@ function buildOpenAiPrompt(call, sameNumberCalls, options = {}) {
     'Decision rules:',
     '- Use decision=qualified when caller narrative indicates an MVA and caller does not clearly admit they caused the crash.',
     '- Do NOT require police report, insurance details, or coverage confirmation to mark qualified.',
+    '- If the caller was not injured, only vehicle/property damage is described, or the agent says BLF cannot take the case because there is no bodily injury, use Unrelated Case and never qualified.',
     '- For non-MVA or non-intake calls, use decision=tag_only and choose one tag.',
     '- Never use lead-status concepts in output. This workflow only marks qualified calls.',
     '- If caller appears to be existing client / callback / case update / follow-up, ALWAYS use Existing Client/Duplicate (never qualified).',
@@ -1087,7 +1129,8 @@ function normalizeClassification(raw) {
   return result;
 }
 
-function buildUpdatePayload(call, classification) {
+function buildUpdatePayload(call, classification, options = {}) {
+  const forceReplaceTag = Boolean(options.forceReplaceTag);
   if (classification.decision === 'qualified') {
     const payload = {
       note: classification.summary_note,
@@ -1106,6 +1149,14 @@ function buildUpdatePayload(call, classification) {
   }
 
   const currentTagNames = getTagNames(call);
+  if (forceReplaceTag) {
+    return {
+      note: classification.summary_note,
+      lead_status: null,
+      tags: [classification.tag || HUMAN_REVIEW_TAG],
+      append_tags: false,
+    };
+  }
   const payload = {
     note: classification.summary_note,
     append_tags: true,
@@ -1237,6 +1288,7 @@ async function processSingleCall(config, call) {
   const heuristicClassification = detectCallerDisconnectedHeuristic(call);
   let classification;
   const existingClientHeuristic = detectExistingClientDuplicateHeuristic(call, priorSameNumberCalls);
+  const noInjuryDisqualification = detectNoBodilyInjuryDisqualification(call);
   const callForClassification = config.force ? { ...call, tags: [], note: null } : call;
   if (heuristicClassification) {
     console.log(`Heuristic classification matched for ${call.id}: ${heuristicClassification.source}`);
@@ -1244,6 +1296,9 @@ async function processSingleCall(config, call) {
   } else if (existingClientHeuristic) {
     console.log(`Heuristic classification matched for ${call.id}: ${existingClientHeuristic.source}`);
     classification = normalizeClassification(existingClientHeuristic);
+  } else if (noInjuryDisqualification) {
+    console.log(`Heuristic classification matched for ${call.id}: ${noInjuryDisqualification.source}`);
+    classification = normalizeClassification(noInjuryDisqualification);
   } else {
     console.log(`Classifying call ${call.id} with model ${config.model}...`);
     const rawClassification = await classifyCall(config, callForClassification, priorSameNumberCalls);
@@ -1295,7 +1350,9 @@ async function processSingleCall(config, call) {
       classification = normalizeClassification(lateExistingClientCheck);
     }
   }
-  const basePayload = buildUpdatePayload(call, classification);
+  const basePayload = buildUpdatePayload(call, classification, {
+    forceReplaceTag: config.force && classification.decision === 'tag_only',
+  });
   const sourceTagResult =
     classification.decision === 'qualified'
       ? applySourceSecondaryTag(call, basePayload, { sourceTag: classification.source_tag })
