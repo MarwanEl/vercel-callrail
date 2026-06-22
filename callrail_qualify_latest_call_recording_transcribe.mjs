@@ -648,19 +648,28 @@ function detectNoBodilyInjuryDisqualification(call) {
   if (!transcript) return null;
 
   const patterns = [
+    /\bno\s+injur(?:y|ies)\b/i,
     /\b(no|not)\s+(injured|hurt)\b/i,
     /\b(no|not)\s+(bodily|physical|personal)\s+injur/i,
     /\b(property|vehicle|car)\s+damage\s+only\b/i,
     /\bonly\s+(property|vehicle|car)\s+damage\b/i,
+    /\bproperty\s+damage\s+(aspect|claim|issue|matter|concern)\b/i,
+    /\bmain\s+concern\b[\s\S]{0,120}\bproperty\s+damage\b/i,
+    /\bsignificant\s+damage\s+to\s+the\s+(building|property|vehicle|car)\b/i,
     /\byou\s+weren't\s+in\s+the\s+car\b/i,
     /\byou\s+were\s+not\s+in\s+the\s+car\b/i,
     /\bout\s+of\s+the\s+car\b[\s\S]{0,160}\b(hit|struck|damage|van|vehicle|car)\b/i,
     /\b(hit|struck|damage)\b[\s\S]{0,160}\bout\s+of\s+the\s+car\b/i,
     /\b(if|because|since)\s+you\s+(weren't|were\s+not)\s+injured\b/i,
-    /\b(if|because|since)\s+there\s+(was|were)\s+no\s+injur/i,
+    /\b(if|because|since)\s+there\s+(was|were|is|'s)\s+no\s+injur/i,
+    /\bif\s+there'?s\s+no\s+injur/i,
     /\b(isn't|is\s+not|not)\s+a\s+case\s+we\s+(would\s+)?be\s+able\s+to\s+take\b/i,
     /\b(we|this firm)\s+(can't|cannot|can\s+not|wouldn't|would\s+not)\s+(take|handle)\s+(this|the)\s+case\b/i,
+    /\b(we|i)\s+(do\s+not|don't)\s+think\s+we\s+would\s+be\s+able\s+to\s+(represent|take|handle)\b/i,
+    /\bnothing\s+we\s+would\s+necessarily\s+be\s+able\s+to\s+represent\b/i,
+    /\bwe\s+represent\s+for\b[\s\S]{0,80}\bbodily\s+injur/i,
     /\bwe\s+(deal|handle)\s+with\b[\s\S]{0,80}\bbodily\s+injur/i,
+    /\brefer\s+you\s+to\s+(a\s+)?website\b[\s\S]{0,120}\b(avvo|appropriate representation|attorney)\b/i,
   ];
 
   if (!patterns.some((re) => re.test(transcript))) return null;
